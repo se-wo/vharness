@@ -157,7 +157,7 @@ class Harness:
                                                        "limits": sb.limits.__dict__, "toolchain": sb.toolchain})
         if ok:
             self.sandbox = sb
-            self.log(f"sandbox: start test passed; hunters and validators get sandbox_run ({sb.limits.__dict__})")
+            self.log(f"sandbox: start test passed; hunters, validators and fixers get sandbox_run ({sb.limits.__dict__})")
             return
         msg = "sandbox start test failed: " + "; ".join(problems)
         if self.cfg.sandbox == "require":
@@ -330,6 +330,13 @@ class Harness:
                     and not any(x["stage"] == "gapfill" for x in open_tasks)):
                 self.store.set_stage(self.run_id, target, f"wave:{wave}", "closing")
                 self.store.add_task(self.run_id, target, "gapfill", {"wave": wave})
+                continue
+            # No fix work open -> one combined gate for the target (SPEC 13.2.4.6).
+            if (self.cfg.fix and self.sandbox is not None and self.store.fixes(self.run_id, target)
+                    and not open_tasks and self.store.doc(self.run_id, target, "fixset") is None
+                    and self.store.stage(self.run_id, target, "fixset") is None):
+                self.store.set_stage(self.run_id, target, "fixset", "queued")
+                self.store.add_task(self.run_id, target, "fixset", {})
                 continue
             # No upstream or verify work open -> one fix task per verified confirmed record (SPEC 13.2.2.1).
             if (self.cfg.fix and self.sandbox is not None

@@ -86,8 +86,12 @@ class Fixer(unittest.TestCase):
         self.assertIn("require_owner(user, note)", read(os.path.join(repo, "notesapp", "notes.py")))
         # R-TST-25 / R-FIX-11: the target is unchanged.
         self.assertEqual(tree_hash(APP), before)
+        fs = h.store.doc(h.run_id, "notesapp", "fixset", parse=True)  # R-TST-26: combined gate ok
+        self.assertEqual(fs["status"], "ok", fs.get("failed"))
+        self.assertEqual(fs["order"], [IDOR, TRAV])
         report = read(os.path.join(h.out, "REPORT.md"))
         self.assertIn("never merges", report)
+        self.assertIn("**ok**", report)
         self.assertIn("| accepted |", report)
         self.assertTrue(os.path.exists(os.path.join(h.out, "FIXES.md")))
 
@@ -162,6 +166,22 @@ class Fixer(unittest.TestCase):
         self.assertIn("Tools in the sandbox:", second_idor[2])
         self.assertIn("python3", second_idor[2])
 
+    def test_r_tst_26_combined_gate_finds_interaction(self):
+        # The traversal fix also weakens require_owner. Alone, each fix passes its gate (the original
+        # get_note never calls require_owner). Together, the IDOR regression test fails.
+        weaken = fake_model._diff("notesapp/auth.py", lambda l: [x.replace('if note["owner"] != user["id"]:',
+                                                                           'if note["owner"] != user["id"] and False:') for x in l])
+
+        def fx(req, m):
+            fp = record_fingerprint(req.prompt)
+            return fix_output(fp, patch=fake_model.traversal_fix_patch() + weaken) if fp == TRAV else fix_output(fp)
+        h, _ = run_fix(fx)
+        self.assertEqual({k: v["status"] for k, v in fixes(h).items()}, {IDOR: "accepted", TRAV: "accepted"})
+        fs = h.store.doc(h.run_id, "notesapp", "fixset", parse=True)
+        self.assertEqual(fs["status"], "interaction")
+        self.assertEqual(fs["failed"], [f"test:{IDOR}"])
+        self.assertIn("**interaction**", read(os.path.join(h.out, "REPORT.md")))
+
 
 class Mechanical(unittest.TestCase):
     def test_mechanical_rules(self):
@@ -171,6 +191,11 @@ class Mechanical(unittest.TestCase):
         self.assertTrue(any("already exists" in e for e in fixer.mechanical(exists, APP, 200)[0]))
         self.assertTrue(fixer.mechanical(dict(good, patch="make it safe"), APP, 200)[0])
         self.assertTrue(any("R-FIX-05" in r for r in fixer.mechanical(good, APP, 0)[1]))
+        conftest = "--- /dev/null\n+++ b/tests/conftest.py\n@@ -0,0 +1 @@\n+import os\n"
+        human = fixer.mechanical(dict(good, patch=good["patch"] + conftest), APP, 200)[1]
+        self.assertTrue(any("test configuration" in r and "conftest.py" in r for r in human), human)
+        new_helper = "--- /dev/null\n+++ b/notesapp/validators.py\n@@ -0,0 +1 @@\n+import os\n"
+        self.assertEqual(fixer.mechanical(dict(good, patch=good["patch"] + new_helper), APP, 200)[1], [])
 
     def test_fix_needs_sandbox(self):
         with self.assertRaises(ValueError):

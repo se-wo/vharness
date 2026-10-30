@@ -1,0 +1,418 @@
+[
+  {
+    "target": "notesapp",
+    "priority": "P1",
+    "reachability": "conditional",
+    "exposure": "exploitable_now",
+    "poc": {
+      "command": "python3 tests/test_default_credentials.py",
+      "original": {
+        "error": null,
+        "exit_code": 1,
+        "run_id": "sbx-00010",
+        "signal": null,
+        "stderr": "FF\n======================================================================\nFAIL: test_empty_configured_token_does_not_allow_empty_bearer (__main__.DefaultCredentialTests.test_empty_configured_token_does_not_allow_empty_bearer)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/scratch/src/tests/test_default_credentials.py\", line 40, in test_empty_configured_token_does_not_allow_empty_bearer\n    self.assertEqual(run({\"ALICE_TOKEN\": \"\", \"BOB_TOKEN\": \"b\" * 32}, \"\"), 0)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 1 != 0\n\n======================================================================\nFAIL: test_public_default_token_not_accepted_when_env_unset (__main__.DefaultCredentialTests.test_public_default_token_not_accepted_when_env_unset)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/scratch/src/tests/test_default_credentials.py\", line 37, in test_public_default_token_not_accepted_when_env_unset\n    self.assertEqual(run({}, \"change-me-a\"), 0)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 1 != 0\n\n----------------------------------------------------------------------\nRan 2 tests in 0.039s\n\nFAILED (failures=2)\n",
+        "stdout": "authenticated as alice\nauthenticated as alice\n",
+        "timed_out": false
+      },
+      "patched": {
+        "error": null,
+        "exit_code": 0,
+        "run_id": "sbx-00011",
+        "signal": null,
+        "stderr": "..\n----------------------------------------------------------------------\nRan 2 tests in 0.039s\n\nOK\n",
+        "stdout": "",
+        "timed_out": false
+      },
+      "result": "fixed"
+    },
+    "record": {
+      "conditions": [
+        {
+          "description": "The operator leaves ALICE_TOKEN and/or BOB_TOKEN unset, which activates the 'change-me-*' defaults, or sets one to an empty string. Nothing warns or fails in either case.",
+          "kind": "system_configuration"
+        },
+        {
+          "description": "The attacker can reach the service's routes over HTTP (app.py:12).",
+          "kind": "network_routing"
+        }
+      ],
+      "confidence": "high",
+      "description": "notesapp/storage.py builds USERS with os.environ.get('ALICE_TOKEN', 'change-me-a') and os.environ.get('BOB_TOKEN', 'change-me-b'). Nothing checks that these variables are set, non-empty, strong or distinct. current_user (auth.py:10-19) compares the presented token with each USERS entry using hmac.compare_digest and returns the first match. A deployment that omits the variables therefore accepts 'Authorization: Bearer change-me-a' as alice and 'Bearer change-me-b' as bob, and tests/test_notes.py:11 relies on this. If a variable is set but empty, 'Authorization: Bearer ' (empty token) matches, because compare_digest('', '') is True. An anonymous caller can then call list_notes, delete_note and export_note as that user. The source confirms the path: every handler gates only on current_user, and no startup check exists.",
+      "evidence": [
+        {
+          "description": "ALICE_TOKEN falls back to the hard-coded 'change-me-a'.",
+          "file": "notesapp/storage.py",
+          "line": 6
+        },
+        {
+          "description": "BOB_TOKEN falls back to the hard-coded 'change-me-b'.",
+          "file": "notesapp/storage.py",
+          "line": 7
+        },
+        {
+          "description": "The constant-time comparison is correct, but it is against a public or empty secret, and the code never validates that the secret is non-empty.",
+          "file": "notesapp/auth.py",
+          "line": 17
+        },
+        {
+          "description": "The test authenticates with 'change-me-a', which shows the default works as a credential.",
+          "file": "tests/test_notes.py",
+          "line": 11
+        },
+        {
+          "description": "The docstring says every route is reachable by any client over HTTP.",
+          "file": "notesapp/app.py",
+          "line": 12
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "default-credential:notesapp/storage.py:USERS",
+      "intended_behavior": "The service must refuse to start, or refuse all authentication, unless every user's token is explicitly configured with a non-empty, sufficiently long and distinct secret. A publicly known or empty token must never authenticate.",
+      "poc_test": {
+        "code": "import os\nimport subprocess\nimport sys\nimport unittest\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n\n# Child process: exit 0 if the configuration is refused or the token is rejected,\n# exit 1 if the token authenticates.\nCHECK = r'''\nimport sys\ntry:\n    from notesapp import auth\nexcept Exception:\n    sys.exit(0)\nclass R:\n    pass\nr = R()\nr.headers = {\"Authorization\": \"Bearer \" + sys.argv[1]}\ntry:\n    user = auth.current_user(r)\nexcept auth.AuthError:\n    sys.exit(0)\nprint(\"authenticated as\", user[\"id\"])\nsys.exit(1)\n'''\n\n\ndef run(env, token):\n    child_env = {\"PATH\": os.environ.get(\"PATH\", \"/usr/bin:/bin\")}\n    child_env.update(env)\n    return subprocess.run([sys.executable, \"-c\", CHECK, token], cwd=ROOT, env=child_env).returncode\n\n\nclass DefaultCredentialTests(unittest.TestCase):\n    def test_public_default_token_not_accepted_when_env_unset(self):\n        self.assertEqual(run({}, \"change-me-a\"), 0)\n\n    def test_empty_configured_token_does_not_allow_empty_bearer(self):\n        self.assertEqual(run({\"ALICE_TOKEN\": \"\", \"BOB_TOKEN\": \"b\" * 32}, \"\"), 0)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+        "command": "python3 tests/test_default_credentials.py",
+        "expectation": "Fails on the current code: both subprocesses print 'authenticated as alice', giving 2 failures and a non-zero exit. Passes after the patch, because the import raises RuntimeError for missing or short tokens and both checks exit 0.",
+        "file_name": "tests/test_default_credentials.py",
+        "language": "python"
+      },
+      "remediation": {
+        "patch": "--- a/notesapp/storage.py\n+++ b/notesapp/storage.py\n@@ -2,10 +2,21 @@\n \n EXPORT_DIR = os.environ.get(\"NOTES_EXPORT_DIR\", \"/var/lib/notesapp/exports\")\n \n+\n+def _required_token(var):\n+    value = os.environ.get(var, \"\")\n+    if len(value) < 16:\n+        raise RuntimeError(f\"{var} must be set to a secret token of at least 16 characters\")\n+    return value\n+\n+\n USERS = {\n-    \"alice\": {\"id\": \"alice\", \"token\": os.environ.get(\"ALICE_TOKEN\", \"change-me-a\")},\n-    \"bob\": {\"id\": \"bob\", \"token\": os.environ.get(\"BOB_TOKEN\", \"change-me-b\")},\n+    \"alice\": {\"id\": \"alice\", \"token\": _required_token(\"ALICE_TOKEN\")},\n+    \"bob\": {\"id\": \"bob\", \"token\": _required_token(\"BOB_TOKEN\")},\n }\n+\n+if len({u[\"token\"] for u in USERS.values()}) != len(USERS):\n+    raise RuntimeError(\"each user must have a distinct token\")\n \n NOTES = {\n     1: {\"id\": 1, \"owner\": \"alice\", \"title\": \"alice private\", \"body\": \"alice secret\"},\n--- a/tests/test_notes.py\n+++ b/tests/test_notes.py\n@@ -1,3 +1,8 @@\n+import os\n+\n+os.environ.setdefault(\"ALICE_TOKEN\", \"test-token-alice-0123456789\")\n+os.environ.setdefault(\"BOB_TOKEN\", \"test-token-bob-0123456789\")\n+\n from notesapp import notes\n \n \n@@ -8,5 +13,5 @@\n \n \n def test_list_only_own():\n-    status, body = notes.list_notes(Req(\"change-me-a\"))\n+    status, body = notes.list_notes(Req(os.environ[\"ALICE_TOKEN\"]))\n     assert status == 200 and all(n[\"owner\"] == \"alice\" for n in body)\n",
+        "strategy": "Remove the hard-coded defaults. At import or startup, require each token env var to be set to a secret of at least 16 characters, and require tokens to be distinct across users. Fail closed with RuntimeError otherwise. Update the existing test to supply its own tokens through the environment."
+      },
+      "root_cause": "storage.py derives user credentials from os.environ.get with hard-coded public defaults and never validates the result (non-empty, minimum strength, distinct per user). current_user trusts USERS without question, so a missing or empty configuration becomes a known or empty credential instead of a startup failure.",
+      "severity": {
+        "impact": {
+          "level": "high",
+          "rationale": "An anonymous attacker takes over a whole user account: listing that user's notes, deleting them, and reaching the authenticated GET /export file-read surface. This defeats the authentication control."
+        },
+        "likelihood": {
+          "level": "medium",
+          "rationale": "This needs a configuration omission, but the code accepts it silently and the tests themselves run on the defaults. The default values are public in the source."
+        },
+        "overall": "high"
+      },
+      "threat_model": {
+        "affected_resource": "The accounts of alice and bob: reading and deleting their notes, plus authenticated access to GET /export",
+        "assumption_broken": "Bearer tokens are secrets that only the operator provisions. If ALICE_TOKEN or BOB_TOKEN is unset, the service silently accepts the public tokens 'change-me-a' and 'change-me-b'. If a variable is set but empty, it accepts an empty bearer string.",
+        "attacker": "An anonymous HTTP client who can read the public source code or guess the 'change-me-*' convention",
+        "boundary": "Anonymous client to authenticated user (bearer-token authentication in current_user)",
+        "starting_capability": "Can send requests to any route in ROUTES (app.py:12 says every route is reachable over HTTP). Has no credentials."
+      },
+      "title": "Hard-coded fallback bearer tokens (and accepted empty tokens) authenticate as any user when env vars are unset",
+      "trace": [
+        {
+          "description": "An anonymous HTTP request is routed to a handler. The routing layer does no authentication.",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 11,
+          "scope": "dispatch"
+        },
+        {
+          "description": "Each handler (get_note at line 13, delete_note at line 21, export_note at line 31) calls current_user(request) as its only gate.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 8,
+          "scope": "list_notes"
+        },
+        {
+          "description": "The token is taken from 'Authorization: Bearer <token>' with no non-empty or minimum-length check.",
+          "file": "notesapp/auth.py",
+          "kind": "propagation",
+          "line": 15,
+          "scope": "current_user"
+        },
+        {
+          "description": "If ALICE_TOKEN is unset, alice's stored token is the public value 'change-me-a'. BOB_TOKEN falls back to 'change-me-b' at line 7. An empty env value is stored as ''.",
+          "file": "notesapp/storage.py",
+          "kind": "propagation",
+          "line": 6,
+          "scope": "USERS"
+        },
+        {
+          "description": "hmac.compare_digest(user['token'], token) is True for the public default or an empty token, so the user object is returned and the attacker acts as that user.",
+          "file": "notesapp/auth.py",
+          "kind": "sink",
+          "line": 17,
+          "scope": "current_user"
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  },
+  {
+    "target": "notesapp",
+    "priority": "P1",
+    "reachability": "reachable",
+    "exposure": "exploitable_now",
+    "poc": {
+      "command": "python3 tests/test_get_note_idor.py",
+      "original": {
+        "error": null,
+        "exit_code": 1,
+        "run_id": "sbx-00014",
+        "signal": null,
+        "stderr": ".F\n======================================================================\nFAIL: test_cannot_read_other_users_note (__main__.GetNoteOwnership.test_cannot_read_other_users_note)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/scratch/src/tests/test_get_note_idor.py\", line 22, in test_cannot_read_other_users_note\n    self.assertNotEqual(status, 200, \"alice read bob's note: %r\" % (body,))\n    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 200 == 200 : alice read bob's note: {'id': 2, 'owner': 'bob', 'title': 'bob private', 'body': 'bob secret'}\n\n----------------------------------------------------------------------\nRan 2 tests in 0.001s\n\nFAILED (failures=1)\n",
+        "stdout": "",
+        "timed_out": false
+      },
+      "patched": {
+        "error": null,
+        "exit_code": 0,
+        "run_id": "sbx-00015",
+        "signal": null,
+        "stderr": "..\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n",
+        "stdout": "",
+        "timed_out": false
+      },
+      "result": "fixed"
+    },
+    "record": {
+      "conditions": [
+        {
+          "description": "The attacker needs a valid bearer token for any user, for example their own account.",
+          "kind": "authentication_level"
+        },
+        {
+          "description": "The target note exists. Ids are small sequential integers, so they are easy to enumerate.",
+          "kind": "data_state"
+        }
+      ],
+      "confidence": "high",
+      "description": "get_note resolves the caller with current_user and then returns storage.get(int(note_id)) without checking ownership. The resolved `user` is never used. Any authenticated user can read every other user's note (title and body) by iterating the small sequential integer ids. The sibling delete_note handler calls require_owner, which shows the check was intended. The source shows no other control on the path: dispatch only routes, and storage.get has no owner filter. The hunter's sandbox run showed alice's token on GET /notes/2 returning 200 with bob's note.",
+      "evidence": [
+        {
+          "description": "The note is returned without require_owner(user, note).",
+          "file": "notesapp/notes.py",
+          "line": 17
+        },
+        {
+          "description": "Sibling delete_note enforces require_owner, so the control exists but is missing from the read path.",
+          "file": "notesapp/notes.py",
+          "line": 25
+        },
+        {
+          "description": "require_owner raises AuthError when note.owner != user.id.",
+          "file": "notesapp/auth.py",
+          "line": 23
+        },
+        {
+          "description": "Seeded note id 2 belongs to bob and has body 'bob secret'; ids are small sequential integers.",
+          "file": "notesapp/storage.py",
+          "line": 12
+        },
+        {
+          "description": "Stated invariant: users must only see and change their own notes.",
+          "file": "README.md",
+          "line": 4
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "idor:notesapp/notes.py:get_note",
+      "intended_behavior": "GET /notes/<id> returns the note only when note['owner'] equals the authenticated user's id. Otherwise it rejects the request with AuthError, or with a 404 so that note existence is not revealed.",
+      "poc_test": {
+        "code": "import os, sys, unittest\nsys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\nfrom notesapp import notes, app\nfrom notesapp.auth import AuthError\n\n\nclass Req:\n    def __init__(self, token, method=\"GET\", path=\"/\", args=None):\n        self.headers = {\"Authorization\": f\"Bearer {token}\"}\n        self.method = method\n        self.path = path\n        self.args = args or {}\n\n\nclass GetNoteOwnership(unittest.TestCase):\n    def test_cannot_read_other_users_note(self):\n        # alice requests bob's note (id 2) via the public dispatcher\n        try:\n            status, body = app.dispatch(Req(\"change-me-a\", \"GET\", \"/notes/2\"))\n        except AuthError:\n            return\n        self.assertNotEqual(status, 200, \"alice read bob's note: %r\" % (body,))\n\n    def test_can_read_own_note(self):\n        status, body = app.dispatch(Req(\"change-me-a\", \"GET\", \"/notes/1\"))\n        self.assertEqual(status, 200)\n        self.assertEqual(body[\"owner\"], \"alice\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+        "command": "python3 tests/test_get_note_idor.py",
+        "expectation": "Fails on the current code because alice receives 200 with bob's note. Passes after the patch because AuthError is raised for a non-owned note, while alice can still read her own note 1.",
+        "file_name": "tests/test_get_note_idor.py",
+        "language": "python"
+      },
+      "remediation": {
+        "patch": "--- a/notesapp/notes.py\n+++ b/notesapp/notes.py\n@@ -14,6 +14,7 @@ def get_note(request, note_id):\n     note = storage.get(int(note_id))\n     if note is None:\n         return 404, {\"error\": \"not found\"}\n+    require_owner(user, note)\n     return 200, note\n \n \n",
+        "strategy": "Call require_owner(user, note) in get_note before returning the note, matching delete_note. Optionally return 404 for notes the caller does not own, so existence is not leaked."
+      },
+      "root_cause": "get_note in notesapp/notes.py performs authentication only and omits the require_owner authorization check that delete_note applies before acting on the note.",
+      "severity": {
+        "impact": {
+          "level": "high",
+          "rationale": "Defeats the stated cross-user confidentiality control: every user's note titles and bodies can be read. It is read-only, and there is no write or privilege escalation."
+        },
+        "likelihood": {
+          "level": "high",
+          "rationale": "Any authenticated user can exploit this with one ordinary request and a guessable integer id. No special preconditions are needed."
+        },
+        "overall": "high"
+      },
+      "threat_model": {
+        "affected_resource": "Title and body of every other user's note, including the seeded 'bob secret' note (id 2)",
+        "assumption_broken": "Users must only see their own notes (README.md:4). get_note authenticates the caller but never authorizes ownership.",
+        "attacker": "Authenticated low-privilege user (for example alice) who holds a valid bearer token",
+        "boundary": "User to another user's note (read)",
+        "starting_capability": "Can send GET /notes/<id> with their own valid Authorization: Bearer token and any integer id"
+      },
+      "title": "IDOR: GET /notes/<id> returns any user's note without an owner check",
+      "trace": [
+        {
+          "description": "GET /notes/<id> is routed to notes.get_note with the last path segment as note_id. No authorization middleware exists in dispatch.",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 15,
+          "scope": "dispatch"
+        },
+        {
+          "description": "current_user authenticates the caller. The result is stored in `user` but never used afterwards.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 13,
+          "scope": "get_note"
+        },
+        {
+          "description": "storage.get(int(note_id)) fetches any note by id with no owner filter.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 14,
+          "scope": "get_note"
+        },
+        {
+          "description": "Returns 200 with the full note dict (owner, title, body) of another user.",
+          "file": "notesapp/notes.py",
+          "kind": "sink",
+          "line": 17,
+          "scope": "get_note"
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  },
+  {
+    "target": "notesapp",
+    "priority": "P1",
+    "reachability": "reachable",
+    "exposure": "exploitable_now",
+    "poc": {
+      "command": "python3 tests/test_export_traversal.py",
+      "original": {
+        "error": null,
+        "exit_code": 1,
+        "run_id": "sbx-00017",
+        "signal": null,
+        "stderr": "",
+        "stdout": "PASS test_export_in_dir_still_works\nFAIL test_export_rejects_dotdot '..' escaped EXPORT_DIR\nFAIL test_export_rejects_absolute absolute name escaped EXPORT_DIR\n",
+        "timed_out": false
+      },
+      "patched": {
+        "error": null,
+        "exit_code": 0,
+        "run_id": "sbx-00018",
+        "signal": null,
+        "stderr": "",
+        "stdout": "PASS test_export_in_dir_still_works\nPASS test_export_rejects_dotdot\nPASS test_export_rejects_absolute\n",
+        "timed_out": false
+      },
+      "result": "fixed"
+    },
+    "record": {
+      "conditions": [
+        {
+          "description": "The attacker needs a valid bearer token. Any tenant's token works, and so do the hard-coded defaults change-me-a/change-me-b if the operator never overrode them.",
+          "kind": "authentication_level"
+        },
+        {
+          "description": "What can be read is limited by the OS permissions of the service process, which the repository does not define.",
+          "kind": "environmental_dependency"
+        }
+      ],
+      "confidence": "high",
+      "description": "export_note builds the file path as os.path.join(storage.EXPORT_DIR, request.args['name']) and opens it with no normalization or containment check. Any authenticated user can send name=/etc/passwd (os.path.join drops the base) or name=../../../etc/passwd and get back the raw bytes of any file the server process can read. For example, /proc/self/environ would expose the other tenant's bearer token and allow account takeover of that tenant. I re-ran the PoC test in the sandbox (sbx-00016) against the unchanged code. The '..' and absolute-path cases both returned a file outside EXPORT_DIR. The source-level path is complete: auth is the only control, and nothing normalizes or validates `name`.",
+      "evidence": [
+        {
+          "description": "Unvalidated os.path.join of the base directory and the client-supplied name.",
+          "file": "notesapp/notes.py",
+          "line": 33
+        },
+        {
+          "description": "The file is opened, and its contents are returned verbatim at line 35.",
+          "file": "notesapp/notes.py",
+          "line": 34
+        },
+        {
+          "description": "EXPORT_DIR (default /var/lib/notesapp/exports) is the intended containment root.",
+          "file": "notesapp/storage.py",
+          "line": 3
+        },
+        {
+          "description": "current_user only authenticates the caller. No check is applied to the file path.",
+          "file": "notesapp/auth.py",
+          "line": 10
+        },
+        {
+          "description": "Tokens come from env vars (with weak hard-coded fallbacks), so reading /proc/self/environ through this bug exposes the other tenant's token.",
+          "file": "notesapp/storage.py",
+          "line": 6
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "path-traversal:notesapp/notes.py:export_note",
+      "intended_behavior": "GET /export should only serve files located inside EXPORT_DIR. It should reject absolute names, '..' traversal and symlink escapes.",
+      "poc_test": {
+        "code": "import os\nimport sys\nimport tempfile\n\nsys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))\n\nfrom notesapp import notes, storage\n\n\nclass Req:\n    def __init__(self, token, args=None):\n        self.headers = {\"Authorization\": f\"Bearer {token}\"}\n        self.args = args or {}\n\n\ndef _setup():\n    root = tempfile.mkdtemp()\n    export_dir = os.path.join(root, \"exports\")\n    os.mkdir(export_dir)\n    with open(os.path.join(export_dir, \"export.txt\"), \"wb\") as fh:\n        fh.write(b\"ok-export\")\n    secret = os.path.join(root, \"secret.txt\")\n    with open(secret, \"wb\") as fh:\n        fh.write(b\"HOST-SECRET\")\n    storage.EXPORT_DIR = export_dir\n    return secret\n\n\ndef _leaks(name):\n    try:\n        status, body = notes.export_note(Req(\"change-me-a\", {\"name\": name}))\n    except Exception:\n        return False\n    return status == 200 and body == b\"HOST-SECRET\"\n\n\ndef test_export_in_dir_still_works():\n    _setup()\n    status, body = notes.export_note(Req(\"change-me-a\", {\"name\": \"export.txt\"}))\n    assert status == 200 and body == b\"ok-export\"\n\n\ndef test_export_rejects_dotdot():\n    _setup()\n    assert not _leaks(\"../secret.txt\"), \"'..' escaped EXPORT_DIR\"\n\n\ndef test_export_rejects_absolute():\n    secret = _setup()\n    assert not _leaks(secret), \"absolute name escaped EXPORT_DIR\"\n\n\nif __name__ == \"__main__\":\n    failed = 0\n    for fn in (test_export_in_dir_still_works, test_export_rejects_dotdot, test_export_rejects_absolute):\n        try:\n            fn()\n            print(\"PASS\", fn.__name__)\n        except AssertionError as e:\n            failed += 1\n            print(\"FAIL\", fn.__name__, e)\n    sys.exit(1 if failed else 0)\n",
+        "command": "python3 tests/test_export_traversal.py",
+        "expectation": "On the current code it exits 1 because the '..' and absolute-path tests return the out-of-directory secret. With the patch it exits 0.",
+        "file_name": "tests/test_export_traversal.py",
+        "language": "python"
+      },
+      "remediation": {
+        "patch": "--- a/notesapp/notes.py\n+++ b/notesapp/notes.py\n@@ -30,6 +30,9 @@\n def export_note(request):\n     user = current_user(request)\n     name = request.args.get(\"name\", \"export.txt\")\n-    path = os.path.join(storage.EXPORT_DIR, name)\n+    base = os.path.realpath(storage.EXPORT_DIR)\n+    path = os.path.realpath(os.path.join(base, name))\n+    if os.path.commonpath([base, path]) != base or path == base:\n+        return 400, {\"error\": \"invalid export name\"}\n     with open(path, \"rb\") as fh:\n         return 200, fh.read()\n",
+        "strategy": "Resolve the joined path with os.path.realpath and require that it lies strictly inside realpath(EXPORT_DIR). Reject anything else with a 400. Consider also scoping exports per user (for example EXPORT_DIR/<user id>/)."
+      },
+      "root_cause": "export_note treats a client-controlled `name` as a path component and passes os.path.join(EXPORT_DIR, name) to open() without resolving the result or checking that it stays inside EXPORT_DIR.",
+      "severity": {
+        "impact": {
+          "level": "high",
+          "rationale": "The filesystem containment boundary is fully defeated. Any file the process can read is disclosed, potentially including the other tenant's token through /proc/self/environ, which would lead to cross-tenant takeover. It requires authentication, so it is not rated critical."
+        },
+        "likelihood": {
+          "level": "high",
+          "rationale": "The attack is a single request with a trivial payload, and any authenticated user can send it. The default tokens may lower the bar further."
+        },
+        "overall": "high"
+      },
+      "threat_model": {
+        "affected_resource": "Any host file the service process can read, such as /etc/passwd, /proc/self/environ (which contains ALICE_TOKEN and BOB_TOKEN when they are set via env), application source, and other tenants' export files",
+        "assumption_broken": "export_note assumes `name` is a plain filename under EXPORT_DIR. os.path.join does not enforce that: an absolute name replaces the base, and '..' segments climb out of it.",
+        "attacker": "An authenticated low-trust user (alice or bob), or any HTTP client holding a valid bearer token, including the hard-coded defaults change-me-a/change-me-b if the operator never set ALICE_TOKEN or BOB_TOKEN",
+        "boundary": "HTTP request parameter to the server filesystem: the client should only be able to read files inside EXPORT_DIR",
+        "starting_capability": "Can send GET /export with a chosen `name` query argument"
+      },
+      "title": "Path traversal in GET /export lets any authenticated user read arbitrary server files",
+      "trace": [
+        {
+          "description": "GET /export is routed straight to notes.export_note. dispatch() applies no other filtering.",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 7,
+          "scope": "ROUTES"
+        },
+        {
+          "description": "current_user only checks that the bearer token is valid. This is the only control on the path.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 31,
+          "scope": "export_note"
+        },
+        {
+          "description": "`name` is taken directly from request.args, which the client controls.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 32,
+          "scope": "export_note"
+        },
+        {
+          "description": "os.path.join(EXPORT_DIR, name) is used with no realpath and no containment check. An absolute name replaces EXPORT_DIR, and '..' escapes it.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 33,
+          "scope": "export_note"
+        },
+        {
+          "description": "open(path, 'rb') reads the file, and the next line returns its bytes to the client with status 200.",
+          "file": "notesapp/notes.py",
+          "kind": "sink",
+          "line": 34,
+          "scope": "export_note"
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  }
+]

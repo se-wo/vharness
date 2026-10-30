@@ -89,6 +89,10 @@ Each fix is written to `<out>/fixes/NNNN-<status>-<fingerprint>.patch` in `git a
 file), and `FIXES.md` shows every gate step's output. vharness never writes to the target, never runs git, and never
 merges: a person applies the patch on a review branch.
 
+Each patch is made against the unchanged commit. When a target's fixes are done, a combined gate applies all
+`accepted` patches together, in priority order, and reruns every regression test and suite. It reports `ok`,
+`conflict` or `interaction`, so a reviewer knows whether the fixes can be stacked on one branch.
+
 ## Usage
 
 ```bash
@@ -146,3 +150,15 @@ non-zero on an unchanged copy and 0 on a patched copy. The default-token fallbac
 mark `needs_validation`, was confirmed by execution. The target directory was byte-identical afterwards. The path
 traversal was not reached in this run: the budget deferred 35 units (listed in the report).
 
+`examples/live-run-fixer/` is a live run with `--sandbox require --fix` (budget 30, $4.13 including $0.35 of fixer
+calls). It found and confirmed all three planted defects, and each PoC result was `fixed`. The fixer produced:
+
+- IDOR: **accepted**. The test fails before and passes after the patch, and the suite passes.
+- Path traversal: **accepted**, the same way.
+- Default tokens: **needs_human**. Removing the fallback tokens breaks the existing tests, so the fixer added a
+  `tests/conftest.py` that sets tokens for them. That changes how the existing tests run, so a person must decide.
+
+The combined gate is **ok** for the two accepted fixes. All three patch files apply with `git am`. Applied together
+with the `needs_human` fix, the other two fixes' regression tests stop working, because the module then needs token
+environment variables. That is why only accepted fixes are combined, and why each patch is reviewed on its own branch.
+The target was byte-identical after the run.

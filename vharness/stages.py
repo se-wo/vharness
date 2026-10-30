@@ -890,5 +890,22 @@ def _write_fix(h, target, rec, status, reason, history, out, steps):
     h.log(f"[{target}] fix       {rec['fingerprint']}: {status} ({reason})")
 
 
+async def fixset(h, task):
+    """SPEC 13.2.4.6: combined gate over the accepted fixes of one target. Plain code."""
+    target = task["target"]
+    order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
+    accepted = []
+    for fx in h.store.fixes(h.run_id, target):
+        if fx["status"] == "accepted":
+            rec = h.store.record(h.run_id, target, fx["fingerprint"])
+            accepted.append((order.get(rec["priority"], 5) if rec else 5, fx["fingerprint"], fx))
+    accepted.sort(key=lambda x: (x[0], x[1]))
+    result = await fixer.run_combined(h, target, [fx for _, _, fx in accepted]) if accepted else {"status": "none", "order": []}
+    h.store.put_doc(h.run_id, target, "fixset", result)
+    h.log(f"[{target}] fixset    {len(accepted)} accepted fix(es) together: {result['status']}"
+          + (f" ({result['failed']})" if result.get("failed") else ""))
+    return "done"
+
+
 HANDLERS = {"recon": recon, "hunt": hunt, "gapfill": gapfill, "dedup": dedup, "validate": validate, "poc": poc,
-            "trace": trace, "verify": verify, "fix": fix}
+            "trace": trace, "verify": verify, "fix": fix, "fixset": fixset}

@@ -274,6 +274,15 @@ def write_reports(store, run_id, out):
         else:
             L.append("No fix was made.")
         L.append("")
+        for t in targets:
+            fs = store.doc(run_id, t["target"], "fixset", parse=True)
+            if fs and fs["status"] != "none":
+                detail = {"ok": "all accepted fixes apply together and every regression test and suite passes",
+                          "conflict": f"the patch of `{fs.get('failed')}` does not apply after the patches before it",
+                          "interaction": f"the patches apply together, but these fail: {', '.join(f'`{x}`' for x in fs.get('failed', []))}",
+                          "error": f"the combined gate could not run: {fs.get('failed')}"}[fs["status"]]
+                L += [f"Combined gate for `{t['target']}` (R-FIX-13): **{fs['status']}**: {detail}. "
+                      "Each patch is made against the unchanged commit; review each on its own branch.", ""]
     if errors:
         L += ["## Output check errors", ""] + [f"- {e}" for e in errors[:50]] + [""]
     write("REPORT.md", "\n".join(L))

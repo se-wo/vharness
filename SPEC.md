@@ -1038,7 +1038,7 @@ WARNING: DO NOT LET THE `fixer` WRITE TO THE TARGET. THE FIXER GIVES A PATCH FIL
 | R-FIX-01 | The patch must agree with R-REC-09. |
 | R-FIX-02 | The test file must be a new file. Its path must be repository-relative. |
 | R-FIX-03 | The patch must not change the test file of the fix. |
-| R-FIX-04 | If the patch changes a test file that was in the target before, the result must be `needs_human`. |
+| R-FIX-04 | If the patch changes a test file that was in the target before, the result must be `needs_human`. The same applies if the patch adds a file that changes how the tests of the target run, for example `conftest.py`. |
 | R-FIX-05 | If the patch changes more lines than `fix_max_lines`, the result must be `needs_human`. The default is 200. |
 
 13.2.4. Gate
@@ -1058,7 +1058,24 @@ WARNING: DO NOT LET THE `fixer` WRITE TO THE TARGET. THE FIXER GIVES A PATCH FIL
 
 13.2.4.4. The start test of the sandbox records the tools that are in the sandbox. The harness gives this list to each agent that has the `sandbox_run` tool.
 
-13.2.4.5. Results:
+13.2.4.5. Each patch is made against the unchanged target. A person must examine each patch on its own branch.
+
+13.2.4.6. Combined gate. When no `fix` task of a target is open, the harness does a combined gate with plain code:
+
+1. In one sandbox copy, apply each `accepted` patch in priority order. Add each test file.
+2. In a new copy for each test, apply the patches again, and execute the test command.
+3. In a new copy for each different suite command, apply the patches again, and execute the suite command.
+4. Write the result: `ok`, `conflict`, or `interaction`.
+
+| Result | Condition |
+|---|---|
+| `ok` | All patches apply together, and all tests and suites pass. |
+| `conflict` | A patch does not apply after the patches before it. |
+| `interaction` | All patches apply, but a test or a suite fails. |
+
+13.2.4.7. The combined gate does not change the result of a fix. The report gives the combined result.
+
+13.2.4.8. Results of one fix:
 
 | Result | Condition |
 |---|---|
@@ -1078,6 +1095,7 @@ WARNING: DO NOT LET THE `fixer` WRITE TO THE TARGET. THE FIXER GIVES A PATCH FIL
 | R-FIX-10 | The harness must write each fix as a patch file that `git am` can apply. The file must contain the patch and the new test file. |
 | R-FIX-11 | The harness must not execute `git`, must not make a branch in the target, and must not merge. |
 | R-FIX-12 | The report must give the result, the reason, and the gate output of each fix. It must say that a person must examine each fix. |
+| R-FIX-13 | The report must give the result of the combined gate. It must name the test or the patch that failed. |
 
 13.2.6. Test requirements
 
@@ -1088,6 +1106,7 @@ WARNING: DO NOT LET THE `fixer` WRITE TO THE TARGET. THE FIXER GIVES A PATCH FIL
 | R-TST-23 | A test must show that a regression in the suite gives `blocked`. |
 | R-TST-24 | A test must show that a patch that changes a test of the target gives `needs_human`. |
 | R-TST-25 | A test must show that the target is not changed after the `fix` stage. |
+| R-TST-26 | A test must show the combined result `ok`, and the combined result `interaction` for two fixes that each pass alone. |
 
 ---
 

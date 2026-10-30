@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 
-STAGE_PRIORITY = {"fix": 0, "verify": 1, "trace": 2, "poc": 3, "validate": 4, "dedup": 5, "gapfill": 6, "hunt": 7, "recon": 8}
+STAGE_PRIORITY = {"fixset": 0, "fix": 0, "verify": 1, "trace": 2, "poc": 3, "validate": 4, "dedup": 5, "gapfill": 6, "hunt": 7, "recon": 8}
 OPEN_TASK = ("queued", "running")
 
 SCHEMA = """
