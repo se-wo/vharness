@@ -38,6 +38,7 @@ recon (3 agents) ─► plan (code) ─► ┌───────────�
 | trace | agent + code symbol index | reachability, exposure (`exploitable_now`/`latent`/`wrong_component`), consumers in other targets |
 | feedback | code | shallow results requeued with a sharper prompt; rejection lessons fed to later hunters |
 | verify | fresh agent (validation model) | independent re-check of every confirmed and needs_validation record |
+| fix | fixer agent (validation model), then a code gate in the sandbox | style-adapted patch + new regression test; test must fail before and pass after, suite must not regress (only with `--fix`) |
 | report | code | `REPORT.md`, `findings.json`, `FINDINGS-DETAIL.md`, `NEEDS-VALIDATION.md`, `WISHLIST.md`, `coverage-ledger.json` |
 
 ## Safety properties
@@ -69,6 +70,24 @@ Every sandbox call is logged with a run ID. A record with `evidence_level: "loca
 exact command, and the report prints the harness-recorded output next to the agent's claim. The sandbox needs root
 on the host. In Docker, it also needs `seccomp=unconfined` and `apparmor=unconfined`; the start test detects a broken
 setup. `--sandbox-limit wall_s=60` changes a limit; `--sandbox-bind DIR` adds a read-only toolchain directory.
+
+## Fixer (`--fix`)
+
+With `--fix` (requires `--sandbox`), each verified confirmed record goes to a `fixer` agent on the validation model.
+It reads the repository, tries changes in its own sandbox copies, and returns a minimal patch in the repository's style,
+one new regression test with its command, and the suite command. Then plain code gates it, each step on a fresh
+sandbox copy of the target:
+
+1. The test fails on the unchanged code.
+2. The test passes on the patched code.
+3. The suite runs on the unchanged code (baseline).
+4. The suite passes on the patched code, unless it already failed at the baseline.
+
+A failure gets one retry with a fresh agent that sees the gate output; after that the fix is `blocked`. A patch that edits
+existing tests or exceeds 200 changed lines is `needs_human`, even if the gate passes, because agents tend to overreach.
+Each fix is written to `<out>/fixes/NNNN-<status>-<fingerprint>.patch` in `git am` format (the patch plus the new test
+file), and `FIXES.md` shows every gate step's output. vharness never writes to the target, never runs git, and never
+merges: a person applies the patch on a review branch.
 
 ## Usage
 
@@ -105,7 +124,7 @@ The backend interface is one method (`async run(AgentRequest) -> AgentResult`), 
 python3 -m unittest discover -s tests -v
 ```
 
-The suite uses a scripted backend (no model) and covers the spec's test requirements R-TST-01 to R-TST-20, plus the
+The suite uses a scripted backend (no model) and covers the spec's test requirements R-TST-01 to R-TST-25, plus the
 STE length check of `SPEC.md` (`scripts/ste_check.py`). The sandbox tests (`tests/test_sandbox.py`) use the real
 sandbox: they try a fork bomb, filling the disk, writes to the target and system directories, a remount, network access,
 leaking host environment variables, and promoting symlinks, FIFOs and hard links. They skip on hosts where the start test fails.
@@ -127,6 +146,3 @@ non-zero on an unchanged copy and 0 on a patched copy. The default-token fallbac
 mark `needs_validation`, was confirmed by execution. The target directory was byte-identical afterwards. The path
 traversal was not reached in this run: the budget deferred 35 units (listed in the report).
 
-## Not built yet
-
-An automated Fixer (SPEC 13.2) is a reserved extension. A human must review every patch.

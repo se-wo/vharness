@@ -139,6 +139,29 @@ class Fixer(unittest.TestCase):
         self.assertEqual(fx["status"], "needs_human")
         self.assertIn("R-FIX-04", fx["reason"])
 
+    def test_suite_that_cannot_run_gets_retry_then_needs_human(self):
+        calls = []
+
+        def pytest_suite(req, m):
+            fp = record_fingerprint(req.prompt)
+            calls.append((fp, req.prompt, req.system))
+            out = fix_output(fp)
+            if fp == IDOR and sum(1 for c in calls if c[0] == IDOR) == 1:
+                out["suite_command"] = "python3 -m pytest -q tests/"  # pytest is not in the sandbox
+            elif fp == TRAV:
+                out["suite_command"] = "python3 -m pytest -q tests/"  # broken on every attempt
+            return out
+        h, _ = run_fix(pytest_suite)
+        fx = fixes(h)
+        self.assertEqual((fx[IDOR]["status"], len(fx[IDOR]["attempts"])), ("accepted", 2))
+        self.assertEqual((fx[TRAV]["status"], len(fx[TRAV]["attempts"])), ("needs_human", 2))
+        self.assertIn("does not run in the sandbox", fx[TRAV]["reason"])
+        second_idor = [c for c in calls if c[0] == IDOR][1]
+        self.assertIn("gate step 3", second_idor[1])
+        # SPEC 13.2.4.4: agents with the sandbox see the tool inventory.
+        self.assertIn("Tools in the sandbox:", second_idor[2])
+        self.assertIn("python3", second_idor[2])
+
 
 class Mechanical(unittest.TestCase):
     def test_mechanical_rules(self):

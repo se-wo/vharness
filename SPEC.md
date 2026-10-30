@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Document | VH-SPEC-001 |
-| Issue | 6 |
+| Issue | 7 |
 | Date | 2026-10-30 |
 | Writing standard | ASD-STE100 (Simplified Technical English) |
 | Status | Approved for build |
@@ -1054,12 +1054,16 @@ WARNING: DO NOT LET THE `fixer` WRITE TO THE TARGET. THE FIXER GIVES A PATCH FIL
 
 13.2.4.2. If the suite command is empty, the harness does not do steps 3 and 4. The report says that no suite was run.
 
-13.2.4.3. Results:
+13.2.4.3. If the suite fails in step 3 and an attempt remains, the harness starts a new attempt. It gives the new agent the output of step 3.
+
+13.2.4.4. The start test of the sandbox records the tools that are in the sandbox. The harness gives this list to each agent that has the `sandbox_run` tool.
+
+13.2.4.5. Results:
 
 | Result | Condition |
 |---|---|
 | `accepted` | All gate steps pass. The mechanical checks give no reason for `needs_human`. |
-| `needs_human` | All gate steps pass, but R-FIX-04 or R-FIX-05 applies, or the suite failed in step 3. |
+| `needs_human` | All gate steps pass, but R-FIX-04 or R-FIX-05 applies, or the suite failed in step 3 in the last attempt. |
 | `blocked` | A gate step fails after the last attempt. |
 | `skipped` | No sandbox, no budget, or no agent result. |
 

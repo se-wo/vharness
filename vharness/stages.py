@@ -846,7 +846,11 @@ async def fix(h, task):
     if not passed:
         return _fix_next(h, target, fp, attempt, history + [entry], reason, out, steps)
     if baseline_failing:
-        human.append("the suite already fails on unchanged code, so a regression cannot be ruled out")
+        base = steps["suite_unchanged"]
+        why = fixer.suite_failure_reason(base)
+        if attempt + 1 < h.cfg.fix_attempts:  # SPEC 13.2.4.3: ask a fresh agent for a suite command that runs
+            return _fix_next(h, target, fp, attempt, history + [entry], f"gate step 3: {why}", out, steps)
+        human.append(f"{why}, so a regression cannot be ruled out")
     status = "needs_human" if human else "accepted"
     reason = "; ".join(human) if human else ("gate passed: the test fails before and passes after the patch"
                                               + ("; the suite passes" if "suite_patched" in steps else "; no suite was run"))

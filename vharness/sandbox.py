@@ -94,6 +94,7 @@ class Sandbox:
         self.extra_binds = [os.path.realpath(p) for p in extra_binds]
         self.available = False
         self.problems = []
+        self.toolchain = {}
 
     # ------------------------------------------------------------------ one run
 
@@ -210,6 +211,33 @@ open("/scratch/probe/big.bin", "wb").write(b"0" * 2_000_000)
 print(json.dumps(r))
 '''
 
+    INVENTORY = ("for t in python3 pip3 node npm go cargo rustc java javac mvn gradle gcc cc make ruby php perl git patch; do "
+                 "command -v $t >/dev/null 2>&1 && echo \"tool $t\"; done; "
+                 "python3 -c 'import sys; print(\"python\", sys.version.split()[0])' 2>/dev/null; "
+                 "for m in pytest unittest; do python3 -c \"import $m\" 2>/dev/null && echo \"pymod $m\"; done; true")
+
+    def inventory(self, target_root, scratch_artifacts):
+        """SPEC 13.2.4.4: which tools exist inside the sandbox."""
+        st = self.run(target_root, RunSpec(command=self.INVENTORY), scratch_artifacts)
+        inv = {"tools": [], "python_modules": [], "python": None}
+        for line in st["stdout"].splitlines():
+            kind, _, value = line.partition(" ")
+            if kind == "tool":
+                inv["tools"].append(value)
+            elif kind == "pymod":
+                inv["python_modules"].append(value)
+            elif kind == "python":
+                inv["python"] = value
+        return inv
+
+    def toolchain_text(self):
+        inv = self.toolchain or {}
+        mods = inv.get("python_modules", [])
+        missing = [m for m in ("pytest",) if m not in mods]
+        return (f"Tools in the sandbox: {', '.join(inv.get('tools', [])) or 'unknown'}; Python {inv.get('python') or '-'} "
+                f"with {', '.join(mods) or 'no test modules'}" + (f"; NOT available: {', '.join(missing)}" if missing else "")
+                + ". Nothing can be installed (no network).")
+
     def probe(self, target_root, scratch_artifacts):
         """Start test: every control must be observed from inside, or the sandbox is unavailable."""
         self.problems = []
@@ -250,6 +278,7 @@ print(json.dumps(r))
             for name, value in want.items():
                 if r["rl"][name] != value:
                     problems.append(f"R-SBX-05: {name} is {r['rl'][name]}, expected {value}")
+            self.toolchain = self.inventory(target_root, scratch_artifacts)
             if not 0 < r["disk"] <= lim.disk_mb * mb * 1.05:
                 problems.append("R-SBX-05: the disk limit is not applied")
             promoted = {p["path"] for p in st["promoted"]}

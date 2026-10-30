@@ -30,7 +30,7 @@ SANDBOX = """\
 SANDBOX: You also have the `sandbox_run` tool. It runs a shell command in an isolated
 sandbox: no network, an empty environment, the target read-only at /target, a fresh
 writable tmpfs at /scratch (the working directory), a new unprivileged user, and limits
-({limits}). Each call is a fresh sandbox; nothing persists between calls. Use
+({limits}). {toolchain} Each call is a fresh sandbox; nothing persists between calls. Use
 `copy_target: true` for a writable copy at /scratch/src (the command then starts there).
 Pass test files with `files` (paths relative to /scratch). Use it for the narrowest
 bounded check that settles a claim: a minimal harness, an existing unit test, a small

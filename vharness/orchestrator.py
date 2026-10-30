@@ -154,7 +154,7 @@ class Harness:
         root = self.store.targets(self.run_id)[0]["root"]
         ok, problems = sb.probe(root, os.path.join(self.out, "sandbox", f"probe-{uuid.uuid4().hex[:6]}"))
         self.store.put_doc(self.run_id, "", "sandbox", {"mode": self.cfg.sandbox, "available": ok, "problems": problems,
-                                                       "limits": sb.limits.__dict__})
+                                                       "limits": sb.limits.__dict__, "toolchain": sb.toolchain})
         if ok:
             self.sandbox = sb
             self.log(f"sandbox: start test passed; hunters and validators get sandbox_run ({sb.limits.__dict__})")
@@ -278,7 +278,8 @@ class Harness:
         if use_sandbox:
             lim = self.sandbox.limits
             system += "\n\n" + SANDBOX.format(limits=f"{lim.wall_s}s wall, {lim.cpu_s}s CPU, {lim.mem_mb} MB memory, "
-                                                       f"{lim.nproc} processes, {lim.disk_mb} MB disk")
+                                                       f"{lim.nproc} processes, {lim.disk_mb} MB disk",
+                                         toolchain=self.sandbox.toolchain_text())
         result = None
         for attempt in range(2):
             agent = agent_id if (attempt == 0 and agent_id) else self.new_agent_id(role, target)

@@ -108,6 +108,17 @@ async def run_gate(h, target, out):
     return True, "gate passed", steps, baseline_failing
 
 
+NOT_RUNNABLE_RE = re.compile(r"No module named|command not found|not found|No such file or directory|can't open file", re.I)
+
+
+def suite_failure_reason(step):
+    out = (step.get("stdout") or "") + (step.get("stderr") or "")
+    if NOT_RUNNABLE_RE.search(out):
+        first = next((l for l in out.splitlines() if NOT_RUNNABLE_RE.search(l)), "").strip()[:160]
+        return f"the suite command does not run in the sandbox ({first})"
+    return "the suite already fails on unchanged code"
+
+
 def mbox(record, fix, test, suite_command, status, reason, steps):
     """R-FIX-10: one `git am`-ready patch: the fix plus the new test file."""
     code = test["code"] if test["code"].endswith("\n") else test["code"] + "\n"
