@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Document | VH-SPEC-001 |
-| Issue | 3 |
+| Issue | 4 |
 | Date | 2026-10-30 |
 | Writing standard | ASD-STE100 (Simplified Technical English) |
 | Status | Approved for build |
@@ -314,6 +314,7 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 | R-PLAN-02 | The `quick` profile must use one subsystem value: `profile/quick/all-in-scope-subsystems`. |
 | R-PLAN-03 | A unit that the budget cannot reach must have the status `deferred` and a reason. |
 | R-PLAN-04 | The `plan` stage must not use a model. |
+| R-PLAN-05 | Each surface must have a maximum of 4 attack classes and 2 boundaries in wave 1. The harness must record the other units as `deferred` with the reason `plan_cap`. |
 
 ### 7.3. Stage `hunt`
 
@@ -367,7 +368,8 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 | R-HUNT-03 | A hunter must not propose the verdict `rejected`. |
 | R-HUNT-04 | A hunter must report each path outside its scope as an `uncovered` entry. |
 | R-HUNT-05 | A `covered` unit must have reviewed paths and at least one check. |
-| R-HUNT-06 | The harness must accept a maximum of 3 sibling units from one hunter result. |
+| R-HUNT-06 | The harness must accept a maximum of 2 sibling units from one hunter result. |
+| R-HUNT-08 | The harness must not store a hardening note that is the same as an earlier note of the target. |
 | R-HUNT-07 | A sibling unit of a sibling unit must not get a new sibling unit. |
 
 ### 7.4. Stage `gapfill`
@@ -401,6 +403,7 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 | R-GAP-03 | The `deep` profile must have a maximum of 5 waves. |
 | R-GAP-04 | The harness must reserve the budget for the critic before it starts a wave. |
 | R-GAP-05 | A reassigned unit must get a new owner. The archive must keep the evidence of the earlier owner. |
+| R-GAP-06 | Each new wave must also include `deferred` units with the reason `plan_cap`, in priority order. |
 
 ### 7.5. Stage `dedup`
 
@@ -473,6 +476,7 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 | R-VAL-05 | A malformed result must start a new validator once. A second failure must leave the candidate unvalidated. |
 | R-VAL-06 | A validator can only decide on its candidate. It must not create new candidates. |
 | R-VAL-07 | Mechanical checks must occur before the validator agent starts. |
+| R-VAL-08 | The harness can remove an empty field that the verdict does not permit. It must not change a field that has content. |
 
 ### 7.7. Stage `trace`
 
@@ -779,9 +783,10 @@ NOTE: A temporary API error can arrive as text inside a successful response [REF
 1. Count each agent invocation against the budget of its target.
 2. Before the `recon` stage, reserve three `recon` calls for the target.
 3. Before each wave, reserve one critic call.
-4. Before each wave, reserve 30% of the budget that remains for dedup, validation, trace, and verification.
-5. Assign hunters in priority order until the hunt allowance is empty.
-6. Set each unassigned unit to `deferred` with the reason `budget`.
+4. Before each hunter starts, calculate the open demand. Count validate, trace, and verify calls for each open candidate. Count the same calls for each other hunter that has started.
+5. Reserve the open demand, one critic call, and 30% of the budget that remains after them.
+6. Start the hunter only if the budget also pays for the hunter and one expected candidate.
+7. Set each unit that the budget cannot reach to `deferred` with the reason `budget`. Set the run to `incomplete`.
 
 10.3. Requirements
 

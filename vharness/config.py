@@ -44,7 +44,9 @@ class Config:
     agent_timeout_s: int = 1800
     shallow_min_checks: int = 2
     shallow_min_turns: int = 4
-    max_siblings_per_result: int = 3
+    max_siblings_per_result: int = 2
+    max_classes_per_surface: int = 4
+    max_boundaries_per_surface: int = 2
     max_custom_classes: int = 6
     dedup_shortlist_max: int = 8
     rejection_notes_per_class: int = 5

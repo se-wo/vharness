@@ -106,6 +106,14 @@ def check_verdict_fields(record, verdict):
     return errors
 
 
+def drop_empty_forbidden(record):
+    """Remove forbidden fields that are empty ({} / [] / ""). They carry no claim, so this is not a repair."""
+    rules = schemas.VERDICT_FIELDS.get(record.get("verdict"))
+    if not rules:
+        return record
+    return {k: v for k, v in record.items() if not (k in rules["forbidden"] and v in ({}, [], "", None))}
+
+
 def check_record(record, root, evidence_level="source"):
     """Full mechanical check of a final record. Returns a list of errors."""
     errors = schemas.validate(record, schemas.RECORD)

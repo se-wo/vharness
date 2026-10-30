@@ -74,7 +74,9 @@ Select a companion file only when you found the boundary its "When to use" text
 describes; record every companion you considered and excluded, with the source fact.
 You may define up to {max_custom} custom attack classes specific to this repository,
 each with a name, a concrete hunting method, and the reason it exists.
-Prefer a few precise classes per surface over every class everywhere.
+Prefer a few precise classes per surface over every class everywhere: at most 4 attack
+classes and 2 boundaries per surface, most important first (the harness defers the rest
+and may revisit them in later waves).
 
 ATTACK-CLASS CATALOG:
 {catalog}""",
@@ -286,7 +288,12 @@ Decide:
   refutes it; include claimed_root_cause and reason; no severity/remediation.
 Examples of claims to reject: "the code calls exec(), so it is critical" without an
 attacker-controlled path; "a principal can write to the database" as a finding by itself.
-The record's `verdict` must equal `decision`. Keep threat_model as the first property."""
+The record's `verdict` must equal `decision`. Keep threat_model as the first property.
+Include ONLY the fields of the chosen verdict. A confirmed record has no claimed_root_cause,
+blockers, validation_plan or reason. A needs_validation record has no root_cause,
+intended_behavior, severity, confidence, remediation, poc_test or reason. A rejected record
+has no root_cause, intended_behavior, severity, confidence, remediation, poc_test, blockers
+or validation_plan. The harness rejects a record with fields of another verdict."""
 
 
 def validator_prompt(target, candidate, checks, blocks, prior):

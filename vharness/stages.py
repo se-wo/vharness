@@ -119,9 +119,9 @@ def plan(h, target):
         in_scope = _in_scope(h.cfg.scope, [s["entry_ref"].split("#")[0]] + s.get("starting_paths", []))
         subsystem = QUICK_SUBSYSTEM if h.cfg.prof.single_subsystem else s["subsystem"]
         base = TRUST_RANK.get(s["trust_level"], 2) * 10 + VALUE_RANK.get(s["resource_value"], 2)
-        for b in s["boundaries"]:
-            for cls in s["attack_classes"]:
-                cls = cls.strip()
+        classes = [c.strip() for c in s["attack_classes"]]
+        for bi, b in enumerate(s["boundaries"]):
+            for ci, cls in enumerate(classes):
                 if not (h.knowledge.has(cls) or cls in customs):
                     h.store.add_note(h.run_id, target, "plan", f"unknown attack class {cls!r} on {s['name']} ignored")
                     continue
@@ -133,6 +133,8 @@ def plan(h, target):
                 )
                 if not in_scope:
                     unit.update(status="out_of_scope", unresolved=["outside --scope"])
+                elif bi >= h.cfg.max_boundaries_per_surface or ci >= h.cfg.max_classes_per_surface:
+                    unit.update(status="deferred", unresolved=["plan_cap"])  # gapfill can promote it later
                 if h.add_unit(target, unit):
                     created += 1
     h.store.add_note(h.run_id, target, "plan", f"planned {created} coverage units")
@@ -218,9 +220,17 @@ async def hunt(h, task):
     units = [u for u in (h.store.unit(h.run_id, target, cid) for cid in p["units"]) if u and u["status"] in ("planned", "in_progress")]
     if not units:
         return "done"
-    if not h.budget.hunt_allowed(target):
+    if not h.budget.hunt_allowed(target, task["task_id"]):
         defer(h, target, units, "budget" if not h.budget.usd_exhausted() else "usd_budget")
+        h.incomplete("hunt_budget_exhausted")
         return "skipped"
+    try:
+        return await _hunt(h, task, target, p, root, units)
+    finally:
+        h.budget.hunt_done(target, task["task_id"])
+
+
+async def _hunt(h, task, target, p, root, units):
 
     arch = h.store.doc(h.run_id, target, "architecture") or ""
     blocks = _blocks_for_units(h, target, units, include_companion_sections=not p.get("no_companion"))
@@ -253,7 +263,12 @@ async def hunt(h, task):
         return "failed"
     out = result.output
     h.record_wishlist(task, target, agent, out.get("wishlist", []))
+    known = [_tokens(n["text"]) for n in h.store.notes(h.run_id, target, "hardening")]
     for note in out.get("hardening", []):
+        tok = _tokens(note)
+        if any(len(tok & k) / max(len(tok | k), 1) >= 0.5 for k in known):
+            continue  # the same note from another hunter
+        known.append(tok)
         h.store.add_note(h.run_id, target, "hardening", note, coverage_id=units[0]["coverage_id"])
 
     # --- candidates: mechanical check, then dedup (SPEC 6.3) ---
@@ -306,6 +321,10 @@ async def hunt(h, task):
     for spec in out.get("uncovered", [])[h.cfg.max_siblings_per_result:]:
         h.store.add_note(h.run_id, target, "uncovered", f"{spec['surface']} / {spec['boundary']} / {spec['attack_class']}: {spec['reason']}")
     return "done"
+
+
+def _tokens(text):
+    return {w for w in re.findall(r"[a-z0-9_./]{3,}", (text or "").lower()) if w not in STOPWORDS}
 
 
 def _hunt_failed(h, target, units, payload, error):
@@ -499,7 +518,7 @@ async def validate(h, task):
     error = None if result.ok else result.error
     record = None
     if result.ok:
-        record = result.output["record"]
+        record = records.drop_empty_forbidden(result.output["record"])
         if record["verdict"] != result.output["decision"]:
             error = "decision and record.verdict disagree"
         else:
@@ -659,6 +678,12 @@ async def gapfill(h, task):
         unit.update(status="deferred", unresolved=[stop_reason]) if stop_reason else unit.update(status="planned")
         h.store.put_unit(h.run_id, target, unit)
         new += not stop_reason
+    if not stop_reason:  # the cost-to-coverage lever: reopen units the plan caps held back
+        capped = [u for u in units if u["status"] == "deferred" and u["unresolved"] == ["plan_cap"]]
+        for u in capped[: max(4, h.cfg.prof.units_per_hunter * 4)]:
+            u.update(status="planned", unresolved=[], wave=wave + 1)
+            h.store.put_unit(h.run_id, target, u)
+            new += 1
     if new and not stop_reason:
         if start_wave(h, target, wave + 1) == 0:
             h.store.set_stage(h.run_id, target, "gapfill", "done")
@@ -695,7 +720,7 @@ async def verify(h, task):
     error = None if result.ok else result.error
     out = result.output if result.ok else None
     if out and out["decision"] == "replace":
-        new = out.get("record")
+        new = records.drop_empty_forbidden(out["record"]) if out.get("record") else None
         if not new:
             error = "replace decision without a record"
         elif new["fingerprint"] != fp:

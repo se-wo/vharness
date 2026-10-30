@@ -322,6 +322,16 @@ class Budget(unittest.TestCase):
         for c in h.store.candidates(h.run_id, "notesapp", ["pending", "primary", "unvalidated"]):
             self.assertNotIn(c["fingerprint"], final)
 
+    def test_budget_funds_found_candidates_before_more_hunting(self):
+        """Regression from the first live run: hunters must not starve validation, trace and verify."""
+        for budget in (10, 12):
+            h = run_harness(FakeModel(), budget=budget)
+            reason = h.store.run(h.run_id)["reason"] or ""
+            self.assertNotIn("verification_budget_exhausted", reason, budget)
+            self.assertNotIn("validation_budget_exhausted", reason, budget)
+            self.assertTrue(confirmed(h), budget)
+            self.assertLessEqual(h.store.invocation_count(h.run_id, "notesapp"), budget)
+
     def test_r_mod_03_same_model_refused(self):
         with self.assertRaises(ValueError):
             Config(discovery_model="m", validation_model="m").validate()
