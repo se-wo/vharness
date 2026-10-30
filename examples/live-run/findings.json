@@ -1,0 +1,395 @@
+[
+  {
+    "target": "notesapp",
+    "priority": null,
+    "reachability": "conditional",
+    "exposure": "exploitable_now",
+    "record": {
+      "blockers": [
+        "Whether production sets ALICE_TOKEN and BOB_TOKEN to strong, non-empty, distinct secrets. The repository has no deployment config, IaC or env files.",
+        "Whether the HTTP server or middleware in front of dispatch (not in the repo) strips or rejects an 'Authorization: Bearer ' header with an empty token before it reaches current_user."
+      ],
+      "claimed_root_cause": "Credential configuration is not validated: storage.USERS silently falls back to public hard-coded tokens and accepts empty tokens. current_user then authenticates any presented token equal to that configured value, including '' and the published defaults.",
+      "description": "storage.USERS reads each user's token with os.environ.get(<VAR>, '<public default>'). current_user() takes everything after 'Bearer ' as the token and compares it to each stored token with hmac.compare_digest. Nothing checks that a configured token is non-default, non-empty or unique, and there is no fail-closed startup check. If ALICE_TOKEN is unset, 'Authorization: Bearer change-me-a' authenticates as alice (the repo's own test uses this value). If ALICE_TOKEN is set to the empty string, 'Authorization: Bearer ' gives token == '' and compare_digest('', '') is True. Either case gives an unauthenticated client the user's scope: list notes, delete owned notes, and use /export. Source review found no other control on the path. All four handlers call current_user first, the line numbers and descriptions in the candidate's trace and evidence match the source, and the repo has no deployment config. Whether this is exploitable depends only on how production sets the two env vars, so the verdict is needs_validation.",
+      "evidence": [
+        {
+          "description": "os.environ.get('ALICE_TOKEN', 'change-me-a'): hard-coded public fallback secret, no validation of empty values",
+          "file": "notesapp/storage.py",
+          "line": 6
+        },
+        {
+          "description": "The same pattern for bob ('change-me-b')",
+          "file": "notesapp/storage.py",
+          "line": 7
+        },
+        {
+          "description": "The only syntactic check is the 'Bearer ' prefix. The remaining token can be empty",
+          "file": "notesapp/auth.py",
+          "line": 13
+        },
+        {
+          "description": "Constant-time equality against the configured value. It does not check that the value is secret",
+          "file": "notesapp/auth.py",
+          "line": 17
+        },
+        {
+          "description": "The repo's own test authenticates with the default 'change-me-a'",
+          "file": "tests/test_notes.py",
+          "line": 11
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "auth:notesapp/storage.py:USERS:default-or-empty-token-fallback",
+      "threat_model": {
+        "affected_resource": "Identity of alice/bob, and so their private notes (GET /notes), deletion of their notes (DELETE /notes/<id>) and GET /export",
+        "assumption_broken": "A bearer token is a secret that only its user holds. If ALICE_TOKEN/BOB_TOKEN are unset, USERS falls back to the public literals 'change-me-a'/'change-me-b'. If one is set to an empty string, the header 'Bearer ' with an empty token matches. current_user accepts both cases without checking.",
+        "attacker": "Anonymous HTTP client with no credentials who has read the public source or guesses common placeholder values",
+        "boundary": "anonymous-to-user identity resolution (current_user)",
+        "starting_capability": "Can send any request to any route in notesapp/app.py ROUTES and choose the Authorization header value"
+      },
+      "title": "Hard-coded fallback bearer tokens (and empty-token acceptance) authenticate anonymous clients as alice/bob when env vars are unset or empty",
+      "trace": [
+        {
+          "description": "Any client's request reaches dispatch, and every route is reachable over HTTP",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 11,
+          "scope": "dispatch"
+        },
+        {
+          "description": "The handler resolves identity only via current_user(request)",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 8,
+          "scope": "list_notes"
+        },
+        {
+          "description": "The token is taken verbatim after 'Bearer ' and can be empty. Nothing checks for an empty or default token",
+          "file": "notesapp/auth.py",
+          "kind": "propagation",
+          "line": 15,
+          "scope": "current_user"
+        },
+        {
+          "description": "alice's token falls back to the public literal 'change-me-a', or is '' if ALICE_TOKEN is set to empty (bob: line 7, 'change-me-b')",
+          "file": "notesapp/storage.py",
+          "kind": "propagation",
+          "line": 6,
+          "scope": "USERS"
+        },
+        {
+          "description": "hmac.compare_digest(user['token'], token) matches the known default or the empty string and returns the user record",
+          "file": "notesapp/auth.py",
+          "kind": "sink",
+          "line": 17,
+          "scope": "current_user"
+        }
+      ],
+      "validation_plan": {
+        "deployment": "Owner-observed only. Check the deployment's process environment or secret manager to confirm ALICE_TOKEN and BOB_TOKEN are set, non-empty, distinct, and not 'change-me-a'/'change-me-b'. Alternatively, as owner, send one GET /notes to a staging instance with 'Authorization: Bearer change-me-a' and confirm it is rejected. Also send 'Authorization: Bearer ' through the real front end to see whether it reaches current_user.",
+        "local": "In a fresh interpreter with ALICE_TOKEN and BOB_TOKEN unset, run notes.list_notes(Req('change-me-a')) using the Req class from tests/test_notes.py and confirm it returns alice's notes. Then in a separate process set ALICE_TOKEN='' before importing notesapp and confirm notes.list_notes(Req('')) (header 'Bearer ') returns alice's notes. Expected on current code: both succeed."
+      },
+      "verdict": "needs_validation"
+    }
+  },
+  {
+    "target": "notesapp",
+    "priority": "P1",
+    "reachability": "reachable",
+    "exposure": "exploitable_now",
+    "record": {
+      "conditions": [
+        {
+          "description": "The attacker needs any valid bearer token, i.e. any user account.",
+          "kind": "authentication_level"
+        },
+        {
+          "description": "The target note id exists. Ids are small sequential integers and easy to enumerate.",
+          "kind": "data_state"
+        }
+      ],
+      "confidence": "high",
+      "description": "notes.get_note resolves the caller with current_user but never checks that the requested note belongs to them. Any authenticated user can loop over note ids (small sequential integers) and read every user's private note title and body. delete_note enforces ownership with require_owner and list_notes filters by owner, so this handler alone breaks the isolation the README promises. No other control sits on the path: dispatch in app.py only routes, and storage.get does no owner scoping.",
+      "evidence": [
+        {
+          "description": "Returns the note without calling require_owner.",
+          "file": "notesapp/notes.py",
+          "line": 17
+        },
+        {
+          "description": "The sibling delete_note calls require_owner(user, note), which shows the intended control.",
+          "file": "notesapp/notes.py",
+          "line": 25
+        },
+        {
+          "description": "require_owner exists and raises AuthError when note['owner'] != user['id'].",
+          "file": "notesapp/auth.py",
+          "line": 22
+        },
+        {
+          "description": "storage.get returns NOTES.get(note_id) with no owner scoping.",
+          "file": "notesapp/storage.py",
+          "line": 17
+        },
+        {
+          "description": "Note 1 belongs to alice and holds the private body 'alice secret'.",
+          "file": "notesapp/storage.py",
+          "line": 11
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "idor:notesapp/notes.py:get_note",
+      "intended_behavior": "GET /notes/<id> should return the note only when note['owner'] equals the caller's id. Otherwise it should respond the same way as for a missing note (404), so the endpoint does not reveal which ids exist.",
+      "poc_test": {
+        "code": "from notesapp import notes\n\n\nclass Req:\n    def __init__(self, token, args=None):\n        self.headers = {\"Authorization\": f\"Bearer {token}\"}\n        self.args = args or {}\n\n\ndef test_bob_cannot_read_alice_note():\n    # note 1 is owned by alice; bob authenticates with his own token\n    status, body = notes.get_note(Req(\"change-me-b\"), \"1\")\n    assert status != 200\n    assert not (isinstance(body, dict) and body.get(\"body\") == \"alice secret\")\n\n\ndef test_owner_can_read_own_note():\n    status, body = notes.get_note(Req(\"change-me-a\"), \"1\")\n    assert status == 200 and body[\"owner\"] == \"alice\"\n",
+        "expectation": "On the current code test_bob_cannot_read_alice_note fails: get_note returns (200, alice's note). After the patch it returns (404, {'error': 'not found'}) and the test passes. test_owner_can_read_own_note passes before and after.",
+        "file_name": "tests/test_get_note_idor.py",
+        "language": "python"
+      },
+      "remediation": {
+        "patch": "--- a/notesapp/notes.py\n+++ b/notesapp/notes.py\n@@ -12,6 +12,6 @@ def list_notes(request):\n def get_note(request, note_id):\n     user = current_user(request)\n     note = storage.get(int(note_id))\n-    if note is None:\n+    if note is None or note[\"owner\"] != user[\"id\"]:\n         return 404, {\"error\": \"not found\"}\n     return 200, note\n",
+        "strategy": "Enforce ownership in get_note. Answer 404 when the note is missing or belongs to someone else, so the endpoint is not an existence oracle. Optionally add a storage helper scoped by owner."
+      },
+      "root_cause": "get_note does not apply the per-note ownership check (require_owner) that delete_note applies, so being authenticated is treated as being authorized for any note id.",
+      "severity": {
+        "impact": {
+          "level": "high",
+          "rationale": "It fully defeats the per-user note isolation control: an attacker can read every user's private note content across users."
+        },
+        "likelihood": {
+          "level": "high",
+          "rationale": "It takes one request with a guessable integer id and needs nothing beyond an ordinary account."
+        },
+        "overall": "high"
+      },
+      "threat_model": {
+        "affected_resource": "Title and body of every other user's note in storage.NOTES, for example note 1 ('alice secret')",
+        "assumption_broken": "README.md:4 says users must only see their own notes. get_note assumes that authenticating the caller is enough and never checks note ownership.",
+        "attacker": "Authenticated low-privilege user, for example bob",
+        "boundary": "User <-> user note isolation when reading one note",
+        "starting_capability": "A valid bearer token for their own account. They can send GET /notes/<id> with any integer id."
+      },
+      "title": "IDOR: any authenticated user can read any other user's note through GET /notes/<id>",
+      "trace": [
+        {
+          "description": "GET /notes/<x> goes to notes.get_note with the attacker-controlled last path segment as note_id. No authorization is applied in routing.",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 15,
+          "scope": "dispatch"
+        },
+        {
+          "description": "current_user authenticates bob from his token. The returned user is never used again.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 13,
+          "scope": "get_note"
+        },
+        {
+          "description": "storage.get(int(note_id)) fetches any note by id, with no owner filter.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 14,
+          "scope": "get_note"
+        },
+        {
+          "description": "The full note, including another user's owner/title/body, is returned with status 200.",
+          "file": "notesapp/notes.py",
+          "kind": "sink",
+          "line": 17,
+          "scope": "get_note"
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  },
+  {
+    "target": "notesapp",
+    "priority": "P1",
+    "reachability": "reachable",
+    "exposure": "exploitable_now",
+    "record": {
+      "conditions": [
+        {
+          "description": "The caller needs a valid bearer token for any user, or the hardcoded defaults 'change-me-a'/'change-me-b' if the operator did not override them.",
+          "kind": "authentication_level"
+        },
+        {
+          "description": "The impact depends on which files the notesapp process can read on the host. Examples are /proc/self/environ, config files and source. The token-theft escalation also requires that the tokens be set via the environment.",
+          "kind": "environmental_dependency"
+        }
+      ],
+      "confidence": "high",
+      "description": "export_note builds the file path with os.path.join(storage.EXPORT_DIR, request.args.get('name', ...)) and opens it with no normalization or containment check. An absolute name such as '/etc/passwd' makes os.path.join discard EXPORT_DIR. A name with '..' segments climbs out of it. The handler returns the raw file bytes with status 200. The only control on the path is bearer-token authentication, which any user passes. The router (app.py) adds no filtering. Reading /proc/self/environ would disclose ALICE_TOKEN and BOB_TOKEN when the operator set them through the environment, which lets the attacker impersonate other users.",
+      "evidence": [
+        {
+          "description": "Unvalidated join of client input onto EXPORT_DIR.",
+          "file": "notesapp/notes.py",
+          "line": 33
+        },
+        {
+          "description": "File contents are returned to the client.",
+          "file": "notesapp/notes.py",
+          "line": 35
+        },
+        {
+          "description": "EXPORT_DIR is the intended confinement root (default /var/lib/notesapp/exports).",
+          "file": "notesapp/storage.py",
+          "line": 3
+        },
+        {
+          "description": "Bearer-token comparison is the only control on this path. It does not restrict the file path.",
+          "file": "notesapp/auth.py",
+          "line": 17
+        },
+        {
+          "description": "User tokens come from the process environment, with public hardcoded defaults. /proc/self/environ would expose real tokens when they are set.",
+          "file": "notesapp/storage.py",
+          "line": 6
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "path-traversal:notesapp/notes.py:export_note",
+      "intended_behavior": "GET /export should only serve files whose resolved real path is strictly inside the resolved EXPORT_DIR. Absolute names, '..' traversal and symlink escapes should be rejected with a 4xx response.",
+      "poc_test": {
+        "code": "import os\n\nfrom notesapp import notes, storage\n\n\nclass Req:\n    def __init__(self, token, args=None):\n        self.headers = {\"Authorization\": f\"Bearer {token}\"}\n        self.args = args or {}\n\n\ndef _setup(tmp_path, monkeypatch):\n    export_dir = tmp_path / \"exports\"\n    export_dir.mkdir()\n    (export_dir / \"export.txt\").write_bytes(b\"ok\")\n    secret = tmp_path / \"secret.txt\"\n    secret.write_bytes(b\"TOP-SECRET\")\n    monkeypatch.setattr(storage, \"EXPORT_DIR\", str(export_dir))\n    return secret\n\n\ndef test_export_rejects_dotdot(tmp_path, monkeypatch):\n    _setup(tmp_path, monkeypatch)\n    status, body = notes.export_note(Req(\"change-me-b\", {\"name\": \"../secret.txt\"}))\n    assert status == 400\n    assert body != b\"TOP-SECRET\"\n\n\ndef test_export_rejects_absolute(tmp_path, monkeypatch):\n    secret = _setup(tmp_path, monkeypatch)\n    status, body = notes.export_note(Req(\"change-me-b\", {\"name\": str(secret)}))\n    assert status == 400\n    assert body != b\"TOP-SECRET\"\n\n\ndef test_export_allows_file_inside_dir(tmp_path, monkeypatch):\n    _setup(tmp_path, monkeypatch)\n    status, body = notes.export_note(Req(\"change-me-b\", {\"name\": \"export.txt\"}))\n    assert status == 200 and body == b\"ok\"\n",
+        "expectation": "On the current code, test_export_rejects_dotdot and test_export_rejects_absolute fail because export_note returns (200, b'TOP-SECRET') for a file outside EXPORT_DIR. With the patch both return 400. test_export_allows_file_inside_dir passes before and after the patch.",
+        "file_name": "tests/test_export_traversal.py",
+        "language": "python"
+      },
+      "remediation": {
+        "patch": "--- a/notesapp/notes.py\n+++ b/notesapp/notes.py\n@@ -30,6 +30,9 @@\n def export_note(request):\n     user = current_user(request)\n     name = request.args.get(\"name\", \"export.txt\")\n-    path = os.path.join(storage.EXPORT_DIR, name)\n+    base = os.path.realpath(storage.EXPORT_DIR)\n+    path = os.path.realpath(os.path.join(base, name))\n+    if path == base or os.path.commonpath([base, path]) != base:\n+        return 400, {\"error\": \"invalid export name\"}\n     with open(path, \"rb\") as fh:\n         return 200, fh.read()\n",
+        "strategy": "Resolve both the base directory and the joined path with os.path.realpath, then reject the request unless the resolved path is strictly inside the base (os.path.commonpath). This also handles absolute names and symlinks. As an optional extra layer, reject names that are absolute or contain path separators."
+      },
+      "root_cause": "export_note treats the client-supplied 'name' as a trusted relative filename. It never resolves the joined path or checks that the result stays under EXPORT_DIR, and os.path.join drops the base when the second argument is absolute.",
+      "severity": {
+        "impact": {
+          "level": "high",
+          "rationale": "It gives arbitrary file read as the service user. That includes secrets in /proc/self/environ, which allows impersonation of other users and access to their notes."
+        },
+        "likelihood": {
+          "level": "high",
+          "rationale": "It takes one request with a trivially chosen parameter, and any user account is enough. The default tokens are public in the repository."
+        },
+        "overall": "high"
+      },
+      "threat_model": {
+        "affected_resource": "Any file the notesapp process can read on the host: /etc/passwd, application source, /proc/self/environ (which holds ALICE_TOKEN/BOB_TOKEN if set), and other secrets.",
+        "assumption_broken": "Files outside EXPORT_DIR cannot be read through GET /export.",
+        "attacker": "Any authenticated end user, for example bob holding his own bearer token. If the operator never set ALICE_TOKEN/BOB_TOKEN, anyone who knows the public default 'change-me-b' or 'change-me-a' also qualifies.",
+        "boundary": "application -> host filesystem (export directory)",
+        "starting_capability": "Can send GET /export?name=<arbitrary string> with a valid 'Authorization: Bearer <token>' header."
+      },
+      "title": "Path traversal in GET /export lets any authenticated user read arbitrary server files",
+      "trace": [
+        {
+          "description": "GET /export is routed to notes.export_note. dispatch (line 16) passes the request straight through with no input filtering.",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 7,
+          "scope": "ROUTES[('GET','/export')]"
+        },
+        {
+          "description": "current_user(request) authenticates the caller by bearer token. This is the only gate, and the result is never used again.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 31,
+          "scope": "export_note"
+        },
+        {
+          "description": "The client-controlled 'name' is read from request.args with no validation.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 32,
+          "scope": "export_note"
+        },
+        {
+          "description": "os.path.join(storage.EXPORT_DIR, name): an absolute name replaces the base, and '..' is neither resolved nor checked.",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 33,
+          "scope": "export_note"
+        },
+        {
+          "description": "open(path, 'rb') opens the attacker-chosen path. Line 35 returns its bytes to the caller with status 200.",
+          "file": "notesapp/notes.py",
+          "kind": "sink",
+          "line": 34,
+          "scope": "export_note"
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  },
+  {
+    "target": "notesclient",
+    "priority": null,
+    "reachability": "unknown",
+    "exposure": "wrong_component",
+    "record": {
+      "blockers": [
+        "The source of notesapp.notes.export_note is not in the repository. It is unknown whether request.args['name'] is joined to a filesystem path (traversal via '../' or an absolute path), used as a cross-user lookup key, or checked against the token owner.",
+        "It is unknown whether export_note reads (disclosure) or writes (overwrite) a name-derived path.",
+        "The installed notesapp version is unknown because there is no dependency manifest.",
+        "It is unknown whether the real caller of sync_export fetches the filename over an authenticated channel. That determines whether an attacker can control the server response."
+      ],
+      "claimed_root_cause": "The client sends an untrusted, server-chosen resource selector to a privileged export handler using the user's credentials, with no client-side validation. Exploitability depends on export_note lacking path confinement or owner checks.",
+      "description": "sync_export (client/sync.py:11-13) puts filename_from_server into Request.args['name']. The comment at line 12 says this value comes from a remote server response. It then calls notesapp.notes.export_note in-process, and the Request carries the user's token as a Bearer Authorization header (line 7). The client does not validate, normalize, or allowlist the name. The repository holds only client/sync.py and an empty README, so no other control exists on the path. Whether this is exploitable depends on notesapp.notes.export_note, which is not in the repository. If it joins 'name' to a filesystem path, or looks the note up without an ownership check against the token, a malicious server could pick which file or note is exported or overwritten. If export_note confines the name to the token owner's notes, the issue does not exist. The source cannot settle this.",
+      "evidence": [
+        {
+          "description": "The comment says the filename comes from a remote server response, so it is untrusted input.",
+          "file": "client/sync.py",
+          "line": 12
+        },
+        {
+          "description": "The value reaches export_note with no validation. No client-side control exists on the path.",
+          "file": "client/sync.py",
+          "line": 13
+        },
+        {
+          "description": "export_note is imported from the external notesapp package, which is not in the repository, so its path and ownership controls cannot be seen.",
+          "file": "client/sync.py",
+          "line": 2
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "confused-deputy:client/sync.py:sync_export",
+      "threat_model": {
+        "affected_resource": "Files or notes reachable by notesapp.notes.export_note through a name-derived path or lookup (other users' notes, or arbitrary local files if the name is joined to a filesystem path)",
+        "assumption_broken": "The note name names only a note owned by the token's user and resolves inside that user's note storage",
+        "attacker": "A hostile, compromised, or impersonated remote sync server (or a network MITM on the unseen fetch channel)",
+        "boundary": "Remote server response -> in-process export_note call made with the local user's bearer token",
+        "starting_capability": "Controls the filename value returned in the sync response, which the caller passes as filename_from_server to sync_export"
+      },
+      "title": "sync_export passes a remote-server-controlled filename unvalidated to export_note with the user's bearer token",
+      "trace": [
+        {
+          "description": "filename_from_server arrives from the remote server response (comment at line 12) together with the user's token.",
+          "file": "client/sync.py",
+          "kind": "entrypoint",
+          "line": 11,
+          "scope": "sync_export"
+        },
+        {
+          "description": "The name is stored unchanged as args['name']. The bearer token goes into the Authorization header at line 7.",
+          "file": "client/sync.py",
+          "kind": "propagation",
+          "line": 8,
+          "scope": "Request.__init__"
+        },
+        {
+          "description": "export_note(Request(token, filename_from_server)) runs in-process. Its handling of args['name'] is external and not visible.",
+          "file": "client/sync.py",
+          "kind": "sink",
+          "line": 13,
+          "scope": "sync_export"
+        }
+      ],
+      "validation_plan": {
+        "deployment": "The owner confirms which notesapp version is installed and whether the sync server channel is authenticated (TLS, pinning), so the attacker precondition (control of the server response) can be judged.",
+        "local": "Get the notesapp source at the version deployed alongside notesclient. Read export_note to find where request.args['name'] reaches os.path.join, open, or a storage lookup, and whether it checks ownership against the user resolved from the Authorization header. In a scratch environment with two users, A and B, call sync_export(token_A, '../B/secret'), sync_export(token_A, '/etc/passwd'), and sync_export(token_A, '<B note id>'). Check whether any of them returns or writes data outside user A's notes."
+      },
+      "verdict": "needs_validation"
+    }
+  }
+]

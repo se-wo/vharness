@@ -73,6 +73,23 @@ def check_outputs(store, run_id, findings, ledger):
     return errors
 
 
+def group_wishlist(items, threshold=0.4):
+    """Merge wishlist items that ask for the same resource; most-requested first."""
+    import re
+    tok = lambda t: {w for w in re.findall(r"[a-z0-9_./]{4,}", t.lower())}
+    groups = []
+    for w in items:
+        t = tok(w["need"])
+        for g in groups:
+            if g["target"] == w["target"] and len(t & g["tokens"]) / max(len(t | g["tokens"]), 1) >= threshold:
+                g["count"] += 1
+                g["agents"].add(w["agent_id"])
+                break
+        else:
+            groups.append(dict(w, tokens=t, count=1, agents={w["agent_id"]}))
+    return sorted(groups, key=lambda g: (-g["count"], g["item_id"]))
+
+
 def _md_escape(text):
     return str(text or "").replace("|", "\\|").replace("\n", " ")
 
@@ -193,13 +210,15 @@ def write_reports(store, run_id, out):
     gaps = [u for u in ledger if u["status"] in ("blocked", "deferred")]
     if gaps:
         L += ["", "Gaps (blocked or deferred units):"]
-        L += [f"- `{u['target']}` {u['surface']} / {u['attack_class']}: {', '.join(u['unresolved'])}" for u in gaps[:40]]
+        L += [f"- `{u['target']}` {u['surface']} / {u['boundary']} / {u['attack_class']}: {', '.join(u['unresolved'])}" for u in gaps[:40]]
+        if len(gaps) > 40:
+            L.append(f"- ... {len(gaps) - 40} more in coverage-ledger.json")
     waves = [s for s in store.stages(run_id) if s["stage"].startswith("wave:")]
     L += ["", f"Hunt waves: {len(waves)}. Each run adds coverage; one run does not exhaust a target.", ""]
     # 8. Wishlist
-    wl = store.wishlist(run_id)
+    wl = group_wishlist(store.wishlist(run_id))
     L += ["## 8. Wishlist", ""]
-    L += [f"- ({w['target']}, {w['agent_id']}) **{w['need']}**: {w['reason']} (unblocks: {w['unblocks']})" for w in wl[:30]] or ["None."]
+    L += [f"- ({w['target']}, asked by {w['count']} agent(s)) **{w['need']}**: unblocks {w['unblocks']}" for w in wl[:20]] or ["None."]
     L.append("")
     # 9. Cost
     L += ["## 9. Cost", "", "| Role | Model | Invocations | OK | Input tokens | Output tokens | USD |", "|---|---|---|---|---|---|---|"]
@@ -247,6 +266,7 @@ def write_reports(store, run_id, out):
 
     # WISHLIST.md
     W = ["# Wishlist", "", "Resources that agents asked for. Supplying one lets the affected work run again.", ""]
-    W += [f"- **{w['need']}** ({w['target']}, {w['agent_id']}): {w['reason']} — unblocks: {w['unblocks']}" for w in wl] or ["None."]
+    W += [f"- **{w['need']}** ({w['target']}; asked {w['count']}x by {', '.join(sorted(w['agents']))}): {w['reason']} — unblocks: {w['unblocks']}"
+          for w in wl] or ["None."]
     write("WISHLIST.md", "\n".join(W) + "\n")
     return paths

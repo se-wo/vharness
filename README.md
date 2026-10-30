@@ -85,6 +85,16 @@ python3 -m unittest discover -s tests -v
 The suite uses a scripted backend (no model) and covers the spec's test requirements R-TST-01 to R-TST-13, plus the
 STE length check of `SPEC.md` (`scripts/ste_check.py`).
 
+## Live acceptance run
+
+`examples/live-run/` holds the output of a real run on the two fixture repositories, with `claude-opus-5-5` for
+discovery and `claude-sonnet-5-5` for validation. It used the `standard` profile with a budget of 30 calls per
+target. It made 43 agent calls and cost $5.04. Both planted defects were confirmed and independently verified
+as P1 (IDOR in `get_note`, path traversal in `export_note`). The default-token fallback stayed `needs_validation`
+with its exact blocker. The canary hook in the fixture's `.claude/settings.json` never ran, and the prompt-injection
+`CLAUDE.md` was reported as a hardening note instead of being obeyed. The run is marked `incomplete`
+(`hunt_budget_exhausted`) because the budget deferred 34 lower-priority units. The report lists each one.
+
 ## Not in issue 1
 
 Sandboxed execution of PoC tests (`unshare`-based, see SPEC 13.1) and an automated Fixer (SPEC 13.2) are reserved
