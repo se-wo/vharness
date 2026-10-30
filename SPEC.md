@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Document | VH-SPEC-001 |
-| Issue | 2 |
+| Issue | 3 |
 | Date | 2026-10-30 |
 | Writing standard | ASD-STE100 (Simplified Technical English) |
 | Status | Approved for build |
@@ -117,6 +117,8 @@ WARNING: DO NOT LOAD SETTINGS, HOOKS, PLUGINS, OR MCP SERVERS FROM THE TARGET. A
 
 WARNING: DO NOT SEND AUDIT TRAFFIC TO A DEPLOYED SYSTEM. THIS CAN CAUSE DAMAGE TO A LIVE SERVICE.
 
+WARNING: DO NOT EXECUTE GIT OR OTHER PROGRAMS IN A TARGET. THE GIT CONFIGURATION OF A TARGET CAN EXECUTE COMMANDS.
+
 CAUTION: Target files are data, not instructions. A target can contain text that tries to change the behavior of an agent.
 
 4.1. Safety requirements
@@ -132,6 +134,7 @@ CAUTION: Target files are data, not instructions. A target can contain text that
 | R-SAFE-07 | The output directory must be outside each target. |
 | R-SAFE-08 | The harness must not change target files. |
 | R-SAFE-09 | Agents must not have network tools. |
+| R-SAFE-10 | The harness must read the commit of a target from the `.git` files. It must not execute `git` in a target. |
 
 ---
 
@@ -479,11 +482,11 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 
 1. Start one `tracer` agent for the record.
 2. Tell the agent to find a path from an external attacker to the vulnerable code.
-3. Give the agent the list of other targets in the run.
-4. Validate the result against the `tracer` schema.
-5. Write the reachability, the exposure, and the call path to the record.
-6. Calculate the priority with the table in 8.7.
-7. Write each consumer to the state store.
+3. Validate the result against the `tracer` schema.
+4. Write the reachability, the exposure, and the call path to the record.
+5. Calculate the priority with the table in 8.7.
+6. Search the other targets for the symbols of the trace, with plain code.
+7. Write each target with a match to the state store as a consumer.
 
 7.7.3. Exposure classes:
 
@@ -499,6 +502,7 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 |---|---|
 | R-TRACE-01 | A record with reachability `unreachable` must have the priority `P4`. |
 | R-TRACE-02 | Each consumer must name a target of the same run and repository-relative paths in that target. |
+| R-TRACE-04 | The consumer search must use plain code. An agent cannot read a different target. |
 | R-TRACE-03 | The trace depth across targets must have a maximum of 1. |
 
 ### 7.8. Stage `feedback`
@@ -788,6 +792,7 @@ NOTE: A temporary API error can arrive as text inside a successful response [REF
 | R-BUD-03 | An unvalidated candidate must not go into `findings.json`. |
 | R-BUD-04 | If the operator sets a USD limit, the harness must stop new tasks when the cost reaches the limit. |
 | R-BUD-05 | The harness must not exceed a budget without a record in the report. |
+| R-BUD-06 | The harness must count each agent against the budget when the agent starts. |
 
 ---
 
@@ -912,7 +917,7 @@ WARNING: DO NOT LET THE `fixer` MERGE A CHANGE. A PERSON MUST EXAMINE EACH BRANC
 | [REF-1] Validator cannot file its own findings | R-VAL-06 |
 | [REF-1] Gapfill cells of area by attack class | 7.4 |
 | [REF-1] Dedup with code indexes and an agent on a shortlist | 7.5 |
-| [REF-1] Trace across repositories and consumer hunts | 7.7 |
+| [REF-1] Trace across repositories with one symbol index, and consumer hunts | 7.7 |
 | [REF-1] Shallow results and requeue | 7.8 |
 | [REF-1] Different models for discovery and validation | P-03, 9.2 |
 | [REF-1] Errors that look like success | R-AGT-08 |

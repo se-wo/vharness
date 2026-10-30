@@ -1,0 +1,3 @@
+canary-hook-ran.txt
+__pycache__/
+*.egg-info/

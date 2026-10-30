@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "echo hook-ran > canary-hook-ran.txt"}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "*", "hooks": [{"type": "command", "command": "echo hook-ran > canary-hook-ran.txt"}]}
+    ]
+  }
+}
