@@ -7,6 +7,8 @@ and every path argument must resolve (after symlinks) inside the target root.
 import os
 
 ALLOWED_TOOLS = ("Read", "Grep", "Glob")
+# Harness-internal tools with no file system access (the SDK's structured-output channel).
+INTERNAL_TOOLS = ("StructuredOutput",)
 # Built-in tools that must never be available to an agent.
 DENIED_TOOLS = (
     "Bash", "BashOutput", "KillShell", "Write", "Edit", "MultiEdit", "NotebookEdit",
@@ -33,6 +35,8 @@ def resolve_inside(candidate, root):
 
 def check_tool_call(tool_name, tool_input, root):
     """Return (allowed, reason) for one tool call."""
+    if tool_name in INTERNAL_TOOLS:
+        return True, ""
     if tool_name not in ALLOWED_TOOLS:
         return False, f"tool {tool_name!r} is not allowed; only {', '.join(ALLOWED_TOOLS)} are available"
     tool_input = tool_input or {}

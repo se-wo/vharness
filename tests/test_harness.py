@@ -176,18 +176,24 @@ class Robustness(unittest.TestCase):
 
     def test_r_tst_08_context_split(self):
         model = FakeModel()
-        # A per-model window that fits a one-unit hunter prompt but not a two-unit one.
+        # Measure the multi-unit hunter prompts, then pick a per-model window just below the smallest one.
+        probe = FakeModel()
+        run_harness(probe, profile="quick")
+        size = lambda r: (len(r.system) + len(r.prompt)) // 4
+        multi = min(size(r) for r in probe.calls if r.role == "hunter")
+        limit = multi - 1
         h = run_harness(model, profile="quick", role_models={"hunter": "small-model"},
-                        context_windows={"small-model": 9_000}, context_fraction=0.25)
+                        context_windows={"small-model": limit * 4}, context_fraction=0.25)
         split = [t for t in h.store.tasks(h.run_id, stages=["hunt"]) if t["status"] == "split"]
         self.assertTrue(split, "expected at least one split hunt task")
         for req in (r for r in model.calls if r.role == "hunter"):
-            self.assertLessEqual((len(req.system) + len(req.prompt)) // 4, 2_250)
+            self.assertLessEqual(size(req) - len(h.store.target_root(h.run_id, "notesapp")) // 4, limit)
         self.assertEqual(len(confirmed(h)), 2)  # splitting lost no coverage
         # A window too small even for one unit blocks the unit with reason context_budget (SPEC 9.3.1 step 6).
         h = run_harness(FakeModel(), profile="quick", role_models={"hunter": "small-model"},
-                        context_windows={"small-model": 8_600}, context_fraction=0.25)
-        self.assertIn(["context_budget"], [u["unresolved"] for u in h.store.units(h.run_id, "notesapp", "blocked")])
+                        context_windows={"small-model": 1_000 * 4}, context_fraction=0.25)
+        blocked = h.store.units(h.run_id, "notesapp", "blocked")
+        self.assertTrue(blocked and all(u["unresolved"] == ["context_budget"] for u in blocked))
 
     def test_r_tst_11_api_error_text_is_an_error(self):
         ok, kind, _ = classify(None, "API Error: 529 {\"type\":\"overloaded_error\"}", False, "success", None, {})

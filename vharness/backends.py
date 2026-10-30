@@ -117,7 +117,7 @@ class ClaudeBackend:
             async for message in query(prompt=prompt_stream(), options=options):
                 if isinstance(message, ResultMessage):
                     final = message
-                    break
+                    continue  # drain the stream; breaking early leaves the SDK generator open
                 for block in getattr(message, "content", None) or []:
                     text = getattr(block, "text", None)
                     if isinstance(text, str):

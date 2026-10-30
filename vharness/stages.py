@@ -233,7 +233,7 @@ async def hunt(h, task):
     system, prompt = prompts.hunter_prompt(target, arch, units, blocks, excluded, exclusions, notes)
 
     model = h.cfg.model_for("hunter")
-    if not h.fits(system, prompt, model):  # SPEC 9.3
+    if not h.fits(system, prompt, model, target):  # SPEC 9.3
         if len(units) > 1:
             half = len(units) // 2
             for part in (units[:half], units[half:]):

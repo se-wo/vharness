@@ -9,6 +9,7 @@ import traceback
 import uuid
 
 from . import schemas, stages
+from .prompts import ROOT_PLACEHOLDER
 from .backends import AgentRequest, AgentResult
 from .budget import Budget
 from .config import Config
@@ -165,7 +166,9 @@ class Harness:
     def new_agent_id(self, role, target):
         return make_agent_id(role, target, self.store.next_seq("agent"))
 
-    def fits(self, system, prompt, model):
+    def fits(self, system, prompt, model, target=None):
+        if target is not None:
+            system = system.replace(ROOT_PLACEHOLDER, self.store.target_root(self.run_id, target))
         return (len(system) + len(prompt)) // 4 <= self.cfg.context_limit_tokens(model)
 
     def current_wave(self, target):
@@ -187,6 +190,7 @@ class Harness:
         target = task["target"]
         model = self.cfg.model_for(role)
         schema = schemas.ROLE_SCHEMAS[schema_key]
+        system = system.replace(ROOT_PLACEHOLDER, self.store.target_root(self.run_id, target))
         result = None
         for attempt in range(2):
             agent = agent_id if (attempt == 0 and agent_id) else self.new_agent_id(role, target)

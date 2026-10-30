@@ -1,0 +1,20 @@
+[project]
+name = "vharness"
+version = "0.1.0"
+description = "Security-focused multi-agent vulnerability harness (source-only)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["claude-agent-sdk>=0.2", "jsonschema>=4"]
+
+[project.scripts]
+vharness = "vharness.cli:main"
+
+[tool.setuptools]
+packages = ["vharness"]
+
+[tool.setuptools.package-data]
+vharness = ["knowledge/*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
