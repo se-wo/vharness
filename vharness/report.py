@@ -23,6 +23,7 @@ def findings_json(store, run_id):
             "priority": r["priority"],
             "reachability": r["reachability"],
             "exposure": r["exposure"],
+            "poc": r["poc"],
             "record": r["data"],
         })
     return sorted(items, key=lambda x: (x["target"], x["record"]["fingerprint"]))
@@ -41,10 +42,16 @@ def check_outputs(store, run_id, findings, ledger):
     errors = []
     roots = {t["target"]: t["root"] for t in store.targets(run_id)}
     fps = set()
+
+    def lookup_for(target):
+        def lookup(sbx_id):
+            run = store.sandbox_run(sbx_id)
+            return run if run and run["run_id"] == run_id and run["target"] == target and not run["error"] else None
+        return lookup
     for i, item in enumerate(findings):
         rec = item.get("record", {})
         root = roots.get(item.get("target"))
-        for e in records.check_record(rec, root):
+        for e in records.check_record(rec, root, lookup_for(item.get("target"))):
             errors.append(f"findings[{i}] {rec.get('fingerprint')}: {e}")
         key = (item.get("target"), rec.get("fingerprint"))
         if key in fps:
@@ -90,6 +97,21 @@ def group_wishlist(items, threshold=0.4):
     return sorted(groups, key=lambda g: (-g["count"], g["item_id"]))
 
 
+POC_LABEL = {
+    "fixed": "fails on unchanged code, passes after the patch",
+    "reproduced": "fails on unchanged code (patch did not make it pass, or no patch)",
+    "not_reproduced": "PASSES on unchanged code: the defect was not reproduced",
+    "error": "could not run (setup, patch or sandbox error)",
+    "no_command": "no command to run",
+}
+
+
+def _poc_line(poc):
+    if not poc:
+        return "not executed (sandbox not in use)"
+    return f"`{poc['result']}`: {POC_LABEL.get(poc['result'], '')}"
+
+
 def _md_escape(text):
     return str(text or "").replace("|", "\\|").replace("\n", " ")
 
@@ -117,6 +139,19 @@ def write_reports(store, run_id, out):
     rejected = [f for f in findings if f["record"]["verdict"] == "rejected"]
     targets = store.targets(run_id)
     partial = run["status"] != "complete" or cfg["profile"] == "quick" or cfg.get("scope")
+    sbx = store.doc(run_id, "", "sandbox", parse=True) or {"mode": "off", "available": False, "problems": []}
+    if sbx["available"]:
+        lim = sbx.get("limits", {})
+        execution = (f"- Execution: **sandboxed** (start test passed: no network, empty environment, read-only target, "
+                     f"tmpfs scratch, new uid, no new privileges; {lim.get('wall_s')}s wall, {lim.get('cpu_s')}s CPU, "
+                     f"{lim.get('mem_mb')} MB memory, {lim.get('nproc')} processes, {lim.get('disk_mb')} MB disk). "
+                     f"{len(store.sandbox_runs(run_id))} sandbox runs recorded. PoC tests were run by the harness (see PoC column).")
+    elif sbx["mode"] != "off":
+        execution = ("- Execution: **source-only**. The sandbox start test failed, so no target code was executed: "
+                     + "; ".join(sbx["problems"]) + ". Proof-of-concept tests and patches are proposals that have **not been executed**.")
+    else:
+        execution = ("- Execution: **source-only** (`--sandbox off`). No target code was executed. Proof-of-concept tests and "
+                     "patches in this report are proposals that have **not been executed** (R-REP-05).")
     unvalidated = [c for t in targets for c in store.candidates(run_id, t["target"], ["pending", "dedup_pending", "primary", "unvalidated"])]
 
     L = ["# Security audit report", ""]
@@ -130,8 +165,7 @@ def write_reports(store, run_id, out):
         f"- Profile: `{cfg['profile']}`; scope: {', '.join(cfg.get('scope') or []) or 'whole repository'}",
         f"- Budget: {cfg.get('budget') or 'none'} invocations per target; USD cap: {cfg.get('max_usd') or 'none'}",
         f"- Discovery model: `{cfg['discovery_model']}`; validation model: `{cfg['validation_model']}`",
-        "- Execution: **source-only**. No target code was executed. Proof-of-concept tests and patches in this report "
-        "are proposals that have **not been executed** (SPEC 1.4, R-REP-05).",
+        execution,
         f"- Prior run used: {cfg.get('prior') or 'none'}",
         "",
         "| Target | Root | Commit |",
@@ -154,10 +188,11 @@ def write_reports(store, run_id, out):
     # 3. Confirmed table
     L += ["## 3. Confirmed vulnerabilities", ""]
     if confirmed:
-        L += ["| Priority | Severity | Exposure | Target | Title | Boundary |", "|---|---|---|---|---|---|"]
+        L += ["| Priority | Severity | Exposure | PoC | Evidence | Target | Title | Boundary |", "|---|---|---|---|---|---|---|---|"]
         for f in confirmed:
             r = f["record"]
-            L.append(f"| {f['priority'] or '-'} | {r['severity']['overall']} | {f['exposure'] or 'unknown'} | {f['target']} | "
+            L.append(f"| {f['priority'] or '-'} | {r['severity']['overall']} | {f['exposure'] or 'unknown'} | "
+                     f"{(f['poc'] or {}).get('result', 'not run')} | {r['evidence_level']} | {f['target']} | "
                      f"{_md_escape(r['title'])} | {_md_escape(r['threat_model']['boundary'])} |")
     else:
         L.append("None.")
@@ -181,6 +216,7 @@ def write_reports(store, run_id, out):
             f"- **Reachability:** {f['reachability'] or 'unknown'}; exposure {f['exposure'] or 'unknown'}",
             f"- **Root cause:** {r['root_cause']}",
             f"- **Fix:** {r['remediation']['strategy']}",
+            f"- **PoC (harness-run):** {_poc_line(f['poc'])}",
             "",
         ]
     # 5. Needs validation
@@ -230,7 +266,8 @@ def write_reports(store, run_id, out):
     write("REPORT.md", "\n".join(L))
 
     # FINDINGS-DETAIL.md
-    D = ["# Findings detail", "", "Proof-of-concept tests and patches were **not executed** by the harness.", ""]
+    D = ["# Findings detail", "", ("PoC tests were executed by the harness in its sandbox; each section gives the result."
+                                    if sbx["available"] else "Proof-of-concept tests and patches were **not executed** by the harness."), ""]
     for f in confirmed:
         r = f["record"]
         if SEV_ORDER[r["severity"]["overall"]] > SEV_ORDER["medium"]:
@@ -243,8 +280,26 @@ def write_reports(store, run_id, out):
         D += ["", "### Intended behavior", "", r["intended_behavior"]]
         if f.get("reachability"):
             D += ["", "### Reachability", "", f"{f['reachability']} / {f['exposure']}"]
-        D += ["", "### Proof-of-concept test (not executed)", "", f"`{r['poc_test']['file_name']}` — {r['poc_test']['expectation']}", "",
-              f"```{r['poc_test']['language']}", r["poc_test"]["code"], "```", "", "### Remediation", "", r["remediation"]["strategy"]]
+        if r.get("execution"):
+            ex = r["execution"]
+            run = store.sandbox_run(ex["run_id"]) or {}
+            D += ["", "### Local evidence (sandbox)", "", f"Run `{ex['run_id']}`: `{ex['command']}`", "",
+                  f"Agent's observed result: {ex['observed_result']}", "",
+                  f"Harness-recorded result: exit {run.get('exit_code')}, timed out {bool(run.get('timed_out'))}", "",
+                  "```text", (run.get("stdout") or "")[-1500:].rstrip() + ("\n" + run["stderr"][-800:].rstrip() if run.get("stderr") else ""), "```"]
+        poc = f.get("poc")
+        D += ["", f"### Proof-of-concept test — {_poc_line(poc)}", "", f"`{r['poc_test']['file_name']}` — {r['poc_test']['expectation']}"]
+        if r["poc_test"].get("command"):
+            D += ["", f"Command: `{r['poc_test']['command']}`"]
+        for label in ("original", "patched"):
+            if poc and poc.get(label):
+                pr = poc[label]
+                D += ["", f"{label.capitalize()} copy (`{pr['run_id']}`): exit {pr.get('exit_code')}"
+                      + (f", error: {pr['error']}" if pr.get("error") else "")]
+                tail = ((pr.get("stdout") or "") + (pr.get("stderr") or ""))[-800:].rstrip()
+                if tail:
+                    D += ["", "```text", tail, "```"]
+        D += ["", f"```{r['poc_test']['language']}", r["poc_test"]["code"], "```", "", "### Remediation", "", r["remediation"]["strategy"]]
         if r["remediation"].get("patch"):
             D += ["", "```diff", r["remediation"]["patch"].rstrip("\n"), "```"]
         D.append("")

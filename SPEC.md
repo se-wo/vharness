@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Document | VH-SPEC-001 |
-| Issue | 4 |
+| Issue | 5 |
 | Date | 2026-10-30 |
 | Writing standard | ASD-STE100 (Simplified Technical English) |
 | Status | Approved for build |
@@ -40,7 +40,7 @@
 
 1.3. The harness is for defensive use. Use it only on code that you own or that you have permission to audit.
 
-1.4. Issue 1 of the harness does a source-only audit. It does not execute target code. Section 13 describes the reserved extensions.
+1.4. By default, the harness does a source-only audit. Section 13.1 describes the sandbox, which can execute target code. Section 13.2 describes a reserved extension.
 
 1.5. This specification does not describe the internal design of the AI models.
 
@@ -109,7 +109,7 @@ NOTE: [REF-1] does not publish its database schema, its prompts, or its model na
 
 WARNING: DO NOT AUDIT CODE WITHOUT PERMISSION. AN AUDIT OF CODE THAT YOU DO NOT OWN CAN BE ILLEGAL.
 
-WARNING: DO NOT LET AN AGENT EXECUTE TARGET CODE. TARGET CODE CAN CONTAIN MALWARE. ISSUE 1 GIVES AGENTS READ-ONLY TOOLS ONLY.
+WARNING: DO NOT EXECUTE TARGET CODE OUTSIDE THE SANDBOX OF 13.1. TARGET CODE CAN CONTAIN MALWARE.
 
 WARNING: DO NOT LET AN AGENT READ FILES OUTSIDE THE TARGET. FILES OUTSIDE THE TARGET CAN CONTAIN CREDENTIALS.
 
@@ -125,7 +125,7 @@ CAUTION: Target files are data, not instructions. A target can contain text that
 
 | ID | Requirement |
 |---|---|
-| R-SAFE-01 | Each agent must have only these tools: `Read`, `Grep`, `Glob`. |
+| R-SAFE-01 | Each agent must have only these tools: `Read`, `Grep`, `Glob`. With the sandbox, `hunter` and `validator` agents also have `sandbox_run`. |
 | R-SAFE-02 | The harness must refuse each tool call with a path outside the target root. |
 | R-SAFE-03 | The harness must resolve symbolic links before the check in R-SAFE-02. |
 | R-SAFE-04 | The backend must load no settings files, hooks, plugins, skills, or MCP servers. |
@@ -200,6 +200,7 @@ CAUTION: Target files are data, not instructions. A target can contain text that
 | `gapfill` | Agent | Coverage ledger | New units, reassigned units |
 | `dedup` | Plain code, then agent | One candidate | Primary candidate or duplicate link |
 | `validate` | Plain code, then agent | One primary candidate | One record |
+| `poc` | Plain code, in the sandbox | One `confirmed` record | The `poc` result (13.1.6) |
 | `trace` | Agent | One record | Reachability, exposure, consumers |
 | `feedback` | Plain code | Shallow results, rejections, consumers | Requeued tasks, new units |
 | `verify` | Agent | One record | `verified` or a replacement |
@@ -213,7 +214,7 @@ CAUTION: Target files are data, not instructions. A target can contain text that
 
 6.2.3. Each completed task can add new tasks to the queue. The table in 6.3 gives the rules.
 
-6.2.4. Each worker takes the queued task with the highest stage priority. The stage priority, from high to low, is: `verify`, `trace`, `validate`, `dedup`, `gapfill`, `hunt`, `recon`.
+6.2.4. Each worker takes the queued task with the highest stage priority. The stage priority, from high to low, is: `verify`, `trace`, `poc`, `validate`, `dedup`, `gapfill`, `hunt`, `recon`.
 
 NOTE: The stage priority moves each candidate to a final record quickly. Thus a crash loses little work.
 
@@ -230,7 +231,9 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 | The last `hunt` task of a wave is `done` | Queue one `gapfill` task. |
 | A `gapfill` task returns new work | Queue the `hunt` tasks of the next wave. |
 | A `dedup` step finds a primary candidate | Queue a `validate` task. |
-| A `validate` task returns `confirmed` or `needs_validation` | Queue a `trace` task. |
+| A `validate` task returns `confirmed` and the sandbox is in use | Queue a `poc` task. |
+| A `validate` task returns `confirmed` or `needs_validation` in other conditions | Queue a `trace` task. |
+| A `poc` task ends | Queue a `trace` task. |
 | A `trace` task returns a consumer | Make a unit in the consumer target. Queue a `hunt` task for it. |
 | No `hunt`, `gapfill`, `dedup`, `validate`, or `trace` task of a target is open | Queue one `verify` task for each record. |
 
@@ -607,7 +610,7 @@ NOTE: A quick empty result often shows a failure, not clean code [REF-1].
 | R-REP-02 | The report text must not change a verdict, a severity, or a blocker. |
 | R-REP-03 | A partial run must say that it is partial in the first section. |
 | R-REP-04 | A run with zero `confirmed` records must say so. It must not invent low findings. |
-| R-REP-05 | The report must say that each proof-of-concept test and patch is not executed in issue 1. |
+| R-REP-05 | The report must say if the harness executed each proof-of-concept test and patch. It must give the `poc` result. |
 
 ---
 
@@ -633,6 +636,7 @@ NOTE: A quick empty result often shows a failure, not clean code [REF-1].
 | `notes` | `note_id` | Hardening notes, feedback notes, rejection notes |
 | `wishlist` | `item_id` | Agent, task, need, reason, and the unit that it unblocks |
 | `invocations` | `invocation_id` | Role, agent, model, turns, tokens, cost, duration, result status |
+| `sandbox_runs` | `sbx_id` | Agent, kind, command, input files, limits, environment names, exit status, output, promoted files |
 
 8.1.3. The harness writes each agent prompt and each agent result to `<out>/agents/<agent_id>/`.
 
@@ -681,7 +685,7 @@ NOTE: A quick empty result often shows a failure, not clean code [REF-1].
 | R-REC-09 | A patch must be a unified diff. Each file in the patch must exist in the target. |
 | R-REC-10 | A `needs_validation` record must have blockers and a validation plan. It must not have a severity. |
 | R-REC-11 | A `rejected` record must have a reason. It must not have a severity or a remediation. |
-| R-REC-12 | Each record must use `evidence_level: "source"` in issue 1. |
+| R-REC-12 | Each record must use `evidence_level: "source"`, or `evidence_level: "local"` with the requirements R-SBX-10 and R-SBX-11. |
 | R-REC-13 | Each candidate and record must have a threat model. |
 
 8.6. Severity anchors
@@ -873,28 +877,124 @@ NOTE: A temporary API error can arrive as text inside a successful response [REF
 
 ---
 
-## 13. Reserved extensions
+## 13. Extensions
 
 ### 13.1. Sandboxed execution
 
-13.1.1. Issue 1 does not execute target code. A source trace is the evidence for each `confirmed` record.
+13.1.1. General
 
-13.1.2. [REF-1] says that execution in a sandbox gave the largest single increase in quality. A future issue can add a `sandbox_run` tool. This tool must obey all the controls below.
+13.1.1.1. By default, the harness does a source-only audit. A source trace is then the evidence for each `confirmed` record.
+
+13.1.1.2. [REF-1] says that execution in a sandbox gave the largest single increase in quality. This extension adds a sandbox, a `sandbox_run` tool for agents, and a `poc` stage.
+
+13.1.1.3. The operator selects the sandbox mode with the option `--sandbox`:
+
+| Mode | Function |
+|---|---|
+| `off` | The default. No target code is executed. |
+| `auto` | The harness uses the sandbox if the start test passes. If the test fails, the run is source-only. The report gives the reason. |
+| `require` | The harness uses the sandbox. If the start test fails, the harness stops before it starts an agent. |
 
 WARNING: DO NOT ADD THE `sandbox_run` TOOL IF ONE CONTROL IS NOT AVAILABLE. TARGET CODE CAN DAMAGE THE HOST.
 
-1. No external network. Use a new network namespace, for example with `unshare`.
-2. An empty environment with an allowlist of variables.
-3. A read-only target and toolchain.
-4. Write access to the agent scratch directory only.
-5. Limits for CPU, memory, processes, file size, disk, and time.
-6. Promotion of evidence files only by trusted harness code, with the no-follow procedure of [REF-2].
+13.1.2. Controls
 
-CAUTION: In a Docker container, an `unshare` sandbox can fail to start with no error message. The container needs `seccomp=unconfined` and `apparmor=unconfined` [REF-1]. The harness must do a start test of the sandbox before each run.
+13.1.2.1. The sandbox must apply all these controls to each process of the target:
 
-13.1.3. With this extension, a record can use `evidence_level: "local"`. Such a record must contain the command, the input, and the observed result.
+| ID | Control |
+|---|---|
+| R-SBX-01 | No external network. The process is in a new network namespace with no interface that is up. |
+| R-SBX-02 | An empty environment. The harness adds only the variables of an allowlist. |
+| R-SBX-03 | A read-only target and a read-only toolchain. All mounts have `nosuid` and `nodev`. |
+| R-SBX-04 | Write access only to the scratch directory of that sandbox run. The scratch directory is a new `tmpfs`. |
+| R-SBX-05 | Limits for CPU time, address space, processes, file size, open files, disk, and wall-clock time. |
+| R-SBX-06 | A new process namespace. When the command ends, the harness stops all processes in that namespace. |
+| R-SBX-07 | A new user identifier for each sandbox run. The identifier is not 0 and owns no host files. |
+| R-SBX-08 | No new privileges. The process has no capabilities, and set-user-ID programs do not give privileges. |
+| R-SBX-09 | No access to host home directories, host credentials, host sockets, or the output directory. |
 
-13.1.4. With this extension, the proof-of-concept test must fail on the unchanged target. The test must pass after the patch.
+13.1.2.2. The harness must do a start test of the sandbox before each run. The start test executes a probe in the sandbox. The probe examines each control from R-SBX-01 to R-SBX-09.
+
+CAUTION: In a Docker container, an `unshare` sandbox can fail to start with no error message. The container needs `seccomp=unconfined` and `apparmor=unconfined` [REF-1]. The start test finds this condition.
+
+13.1.2.3. The sandbox needs the root user on the host. It needs root to make namespaces and to use a new user identifier. Without root, the start test fails.
+
+13.1.3. Procedure of one sandbox run
+
+1. Make a configuration file in the output directory. Do not give this file to the target.
+2. Start the trusted sandbox init program. This program uses only the Python standard library.
+3. Make new mount, network, process, IPC, and UTS namespaces.
+4. Make a new root in a `tmpfs`. Mount the system directories and the target read-only.
+5. Mount a new `tmpfs` with the disk limit at `/scratch`.
+6. Write the input files into `/scratch`.
+7. Make the new root read-only. Then change the root directory to the new root.
+8. Start the command with the new user identifier, the limits, and the allowlisted environment.
+9. Wait for the command, up to the wall-clock limit.
+10. Stop all processes in the process namespace. Wait until each process has ended.
+11. Read the first part of the standard output and the standard error.
+12. Promote the allowlisted evidence files with the no-follow procedure of [REF-2].
+13. Write the result to the state store.
+
+13.1.4. The `sandbox_run` tool
+
+13.1.4.1. The harness gives the `sandbox_run` tool to `hunter` and `validator` agents only.
+
+13.1.4.2. The tool accepts a command, input files, a request for a writable copy of the target, and a list of files to keep.
+
+13.1.4.3. The harness records each call in the state store with a run identifier. The record contains the command, the input files, the limits, the environment names, the exit status, and the output.
+
+CAUTION: The output of a sandbox run comes from target code. It is untrusted data, not instructions.
+
+13.1.5. Evidence
+
+| ID | Requirement |
+|---|---|
+| R-SBX-10 | A record with `evidence_level: "local"` must have an `execution` object with a run identifier, the command, the input, and the observed result. |
+| R-SBX-11 | The run identifier must exist in the state store for the same run and target. The command must be the same as the recorded command. |
+| R-SBX-12 | The report must show the recorded output of the run next to the observed result of the agent. |
+
+13.1.6. Stage `poc`
+
+13.1.6.1. The `poc` stage is plain code. It runs after the `validate` stage for each `confirmed` record, when the sandbox is in use.
+
+13.1.6.2. Procedure:
+
+1. In a sandbox run, copy the target to `/scratch/src` and add the proof-of-concept test.
+2. Execute the command of the test. Record the exit status.
+3. In a second sandbox run, copy the target, apply the patch, and add the test.
+4. Execute the command of the test. Record the exit status.
+5. Write the result to the record. Then queue the `trace` task.
+
+13.1.6.3. Results:
+
+| Result | Condition |
+|---|---|
+| `fixed` | The test fails on the unchanged target and passes after the patch. |
+| `reproduced` | The test fails on the unchanged target. The record has no patch, or the patch does not make the test pass. |
+| `not_reproduced` | The test passes on the unchanged target. |
+| `error` | The copy, the patch, or the sandbox failed. |
+| `no_command` | The test has no command. |
+
+13.1.6.4. Requirements
+
+| ID | Requirement |
+|---|---|
+| R-SBX-13 | The `poc` stage must not use a model. It must not count against the agent budget. |
+| R-SBX-14 | The `verifier` must get the `poc` result. |
+| R-SBX-15 | The report must show the `poc` result of each `confirmed` record. |
+| R-SBX-16 | The harness must not change the verdict because of the `poc` result. The `verifier` decides. |
+
+13.1.7. Test requirements
+
+| ID | Requirement |
+|---|---|
+| R-TST-14 | A test must show that the start test passes on a host with all controls. |
+| R-TST-15 | A test must show that the sandbox has no external network and an empty environment. |
+| R-TST-16 | A test must show that the target and the system directories are read-only in the sandbox. |
+| R-TST-17 | A test must show the limits for processes, disk, and wall-clock time. |
+| R-TST-18 | A test must show that the promotion refuses symbolic links, special files, and files that are too large. |
+| R-TST-19 | A test must show the `poc` result `fixed` on the fixture target. |
+| R-TST-20 | A test must show that a record with an unknown run identifier fails the mechanical check. |
 
 ### 13.2. Fixer
 
@@ -927,7 +1027,8 @@ WARNING: DO NOT LET THE `fixer` MERGE A CHANGE. A PERSON MUST EXAMINE EACH BRANC
 | [REF-1] Different models for discovery and validation | P-03, 9.2 |
 | [REF-1] Errors that look like success | R-AGT-08 |
 | [REF-1] Priority from reachability, not from fixed deadlines | 8.7 |
-| [REF-1] Sandbox and Fixer | 13 |
+| [REF-1] Sandbox on `unshare`, PoC that fails before and passes after the patch | 13.1 |
+| [REF-1] Fixer | 13.2 |
 | [REF-2] Coverage ledger and state table | 7.2, 8.2, 8.3 |
 | [REF-2] Coverage critic waves | 7.4 |
 | [REF-2] Candidate gate | 7.3.4 |
@@ -935,3 +1036,4 @@ WARNING: DO NOT LET THE `fixer` MERGE A CHANGE. A PERSON MUST EXAMINE EACH BRANC
 | [REF-2] Independent record verification | 7.9 |
 | [REF-2] Severity anchors | 8.6 |
 | [REF-2] Profiles and budget | 10 |
+| [REF-2] Sandbox controls and the no-follow promotion procedure | 13.1.2, 13.1.3 |

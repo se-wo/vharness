@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 
 from . import prompts, records, schemas
 from .ids import QUICK_SUBSYSTEM, coverage_id, valid_fingerprint
+from .sandbox import RunSpec, poc_result, poc_script
 
 TRUST_RANK = {"unauthenticated": 0, "local": 1, "build_time": 1, "authenticated": 2, "privileged": 3}
 VALUE_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -240,7 +241,7 @@ async def _hunt(h, task, target, p, root, units):
     notes = []
     for cls in sorted({u["attack_class"] for u in units}):
         notes += [n["text"] for n in h.store.notes(h.run_id, target, "rejection", cls, limit=h.cfg.rejection_notes_per_class)]
-    system, prompt = prompts.hunter_prompt(target, arch, units, blocks, excluded, exclusions, notes)
+    system, prompt = prompts.hunter_prompt(target, arch, units, blocks, excluded, exclusions, notes, sandbox=h.sandbox is not None)
 
     model = h.cfg.model_for("hunter")
     if not h.fits(system, prompt, model, target):  # SPEC 9.3
@@ -257,7 +258,7 @@ async def _hunt(h, task, target, p, root, units):
 
     agent = h.new_agent_id("hunter", target)
     set_units(h, target, units, status="in_progress", agent_id=agent, reviewed_paths=[], checks=[], fingerprints=[], unresolved=[])
-    result, agent = await h.invoke(task, "hunter", "hunter", system, prompt, agent_id=agent)
+    result, agent = await h.invoke(task, "hunter", "hunter", system, prompt, agent_id=agent, sandbox=True)
     if not result.ok:
         _hunt_failed(h, target, units, p, result.error)
         return "failed"
@@ -276,7 +277,7 @@ async def _hunt(h, task, target, p, root, units):
     depth = max(u.get("depth", 0) for u in units)
     admitted = set()
     for cand in out.get("candidates", []):
-        errors = records.check_candidate(cand, root)
+        errors = records.check_candidate(cand, root, h.sandbox_lookup(target))
         if errors:
             reject_mechanical(h, target, cand, errors)
             continue
@@ -491,7 +492,8 @@ async def validate(h, task):
     if not cand or cand["status"] != "primary":
         return "done"
     data = {k: v for k, v in cand["data"].items() if not k.startswith("__")}
-    errors = records.check_candidate(data, root)  # R-VAL-07: mechanical first
+    lookup = h.sandbox_lookup(target)
+    errors = records.check_candidate(data, root, lookup)  # R-VAL-07: mechanical first
     if errors:
         reject_mechanical(h, target, data, errors)
         h.store.set_candidate_status(h.run_id, target, fp, "validated", fp)
@@ -511,10 +513,14 @@ async def validate(h, task):
                 seen.add(ref)
                 vblocks.append((ref, text))
     prior = h.prior_records.get((target, fp))
-    system, prompt = prompts.validator_prompt(target, data, checks, vblocks, prior)
+    runs = None
+    if h.sandbox is not None:
+        cited = (data.get("execution") or {}).get("run_id")
+        runs = [_run_brief(h.store.sandbox_run(cited))] if cited and lookup(cited) else []
+    system, prompt = prompts.validator_prompt(target, data, checks, vblocks, prior, runs)
     if p.get("previous_error"):
         prompt += f"\n\nNOTE: a previous validator's record failed the harness's mechanical checks: {p['previous_error']}"
-    result, agent = await h.invoke(task, "validator", "validator", system, prompt, exclude=[cand["hunter"]])
+    result, agent = await h.invoke(task, "validator", "validator", system, prompt, exclude=[cand["hunter"]], sandbox=True)
     error = None if result.ok else result.error
     record = None
     if result.ok:
@@ -522,7 +528,7 @@ async def validate(h, task):
         if record["verdict"] != result.output["decision"]:
             error = "decision and record.verdict disagree"
         else:
-            errs = records.check_record(record, root)
+            errs = records.check_record(record, root, lookup)
             if errs:
                 error = "; ".join(errs[:5])
     if error:  # R-VAL-05
@@ -549,7 +555,9 @@ async def validate(h, task):
             h.store.add_note(h.run_id, target, "rejection", f"{record['title']} -> rejected: {record['reason'][:300]}", attack_class=cls)
     if not h.cfg.prof.separate_verify:  # R-VER-02: quick merges validate and verify
         h.store.update_record(h.run_id, target, new_fp, final=1, verifiers=[agent])
-    if record["verdict"] in ("confirmed", "needs_validation"):
+    if record["verdict"] == "confirmed" and h.sandbox is not None:
+        h.store.add_task(h.run_id, target, "poc", {"fingerprint": new_fp})
+    elif record["verdict"] in ("confirmed", "needs_validation"):
         h.store.add_task(h.run_id, target, "trace", {"fingerprint": new_fp})
     elif h.cfg.prof.separate_verify:
         h.store.update_record(h.run_id, target, new_fp, final=1)
@@ -693,6 +701,50 @@ async def gapfill(h, task):
     return "done"
 
 
+# =========================================================================== poc (SPEC 13.1.6)
+
+def _run_brief(run):
+    if not run:
+        return None
+    return {k: run[k] for k in ("sbx_id", "kind", "command", "exit_code", "signal", "timed_out", "duration_ms", "stdout", "stderr")}
+
+
+async def poc(h, task):
+    """Plain code: run the PoC test on an unchanged copy and on a patched copy, in the sandbox."""
+    target, fp = task["target"], task["payload"]["fingerprint"]
+    rec = h.store.record(h.run_id, target, fp)
+    if not rec or rec["removed"] or rec["verdict"] != "confirmed":
+        return "done"
+    data = rec["data"]
+    test = data.get("poc_test") or {}
+    result = {"result": "no_command"}
+    if test.get("command") and h.sandbox is not None:
+        if not records.safe_relpath(test["file_name"]):
+            result = {"result": "error", "reason": "poc_test.file_name is not repository-relative"}
+        else:
+            patch = (data.get("remediation") or {}).get("patch") or ""
+            runs = {}
+            for label, patched in (("original", False), ("patched", True)):
+                if patched and not patch.strip():
+                    continue
+                files = [{"path": ".vhin/poc", "content": test["code"]}]
+                if patched:
+                    files.append({"path": ".vhin/fix.patch", "content": patch if patch.endswith("\n") else patch + "\n"})
+                spec = RunSpec(command=poc_script(data, patched), files=files)
+                sbx_id, st, error = await h.sandbox_exec(target, "harness", f"poc-{label}", spec,
+                                                         os.path.join(h.out, "sandbox", "poc-artifacts"))
+                runs[label] = {"run_id": sbx_id, "error": error} | ({} if not st else {
+                    "exit_code": st["exit_code"], "signal": st["signal"], "timed_out": st["timed_out"],
+                    "stdout": st["stdout"][-2000:], "stderr": st["stderr"][-2000:]})
+            orig, pat = runs.get("original"), runs.get("patched")
+            ok = lambda r: r if r and not r.get("error") else None
+            result = {"result": poc_result(ok(orig), ok(pat), bool(patch.strip())), "command": test["command"], **runs}
+    h.store.update_record(h.run_id, target, fp, poc=result)
+    h.log(f"[{target}] poc       {fp}: {result['result']}")
+    h.store.add_task(h.run_id, target, "trace", {"fingerprint": fp})
+    return "done"
+
+
 # =========================================================================== verify
 
 async def verify(h, task):
@@ -715,7 +767,9 @@ async def verify(h, task):
     if round_ == 2:
         note = ("This is a proposed replacement for an earlier record; a different verifier proposed it because: "
                 f"{p['reason']}. Verify the replacement independently.")
-    system, prompt = prompts.verifier_prompt(target, subject, note)
+    cited = (subject.get("execution") or {}).get("run_id")
+    runs = [_run_brief(h.store.sandbox_run(cited))] if cited and h.store.sandbox_run(cited) else None
+    system, prompt = prompts.verifier_prompt(target, subject, note, poc=rec["poc"], runs=runs)
     result, agent = await h.invoke(task, "verifier", "verifier", system, prompt, exclude=exclude)
     error = None if result.ok else result.error
     out = result.output if result.ok else None
@@ -726,7 +780,7 @@ async def verify(h, task):
         elif new["fingerprint"] != fp:
             error = "replacement changes the fingerprint"
         else:
-            errs = records.check_record(new, root)
+            errs = records.check_record(new, root, h.sandbox_lookup(target))
             error = "; ".join(errs[:5]) if errs else None
     if error:
         if p.get("attempt", 0) == 0:
@@ -756,4 +810,5 @@ async def verify(h, task):
     return "done"
 
 
-HANDLERS = {"recon": recon, "hunt": hunt, "gapfill": gapfill, "dedup": dedup, "validate": validate, "trace": trace, "verify": verify}
+HANDLERS = {"recon": recon, "hunt": hunt, "gapfill": gapfill, "dedup": dedup, "validate": validate, "poc": poc,
+            "trace": trace, "verify": verify}

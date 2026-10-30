@@ -33,9 +33,12 @@ def resolve_inside(candidate, root):
     return real if _inside(real, real_root) else None
 
 
-def check_tool_call(tool_name, tool_input, root):
-    """Return (allowed, reason) for one tool call."""
-    if tool_name in INTERNAL_TOOLS:
+def check_tool_call(tool_name, tool_input, root, extra_tools=()):
+    """Return (allowed, reason) for one tool call.
+
+    `extra_tools` are harness tools (such as the sandbox) that validate their own input.
+    """
+    if tool_name in INTERNAL_TOOLS or tool_name in extra_tools:
         return True, ""
     if tool_name not in ALLOWED_TOOLS:
         return False, f"tool {tool_name!r} is not allowed; only {', '.join(ALLOWED_TOOLS)} are available"
@@ -56,11 +59,11 @@ def check_tool_call(tool_name, tool_input, root):
     return True, ""
 
 
-def make_pre_tool_hook(root):
+def make_pre_tool_hook(root, extra_tools=()):
     """Build an Agent SDK PreToolUse hook that enforces check_tool_call."""
 
     async def hook(input_data, tool_use_id, context):
-        allowed, reason = check_tool_call(input_data.get("tool_name"), input_data.get("tool_input"), root)
+        allowed, reason = check_tool_call(input_data.get("tool_name"), input_data.get("tool_input"), root, extra_tools)
         if allowed:
             return {}
         return {

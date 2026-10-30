@@ -58,6 +58,39 @@ def recon_output(focus):
     }
 
 
+IDOR_POC = """import sys
+sys.path.insert(0, ".")
+from notesapp import notes
+from notesapp.auth import AuthError
+
+
+class Req:
+    headers = {"Authorization": "Bearer change-me-b"}  # bob
+    args = {}
+
+
+try:
+    status, body = notes.get_note(Req(), "1")  # alice's note
+except AuthError:
+    sys.exit(0)  # refused: the defect is fixed
+print("bob read:", body)
+sys.exit(1 if status == 200 and body["owner"] == "alice" else 0)
+"""
+
+
+def idor_patch():
+    import difflib
+    path = os.path.join(FIXTURES, "notesapp", "notesapp", "notes.py")
+    old = open(path).read().splitlines(keepends=True)
+    new, done = [], False
+    for line in old:
+        if not done and line.strip() == "return 200, note":
+            new.append("    require_owner(user, note)\n")
+            done = True
+        new.append(line)
+    return "".join(difflib.unified_diff(old, new, "a/notesapp/notes.py", "b/notesapp/notes.py"))
+
+
 def idor_candidate():
     t = "notesapp"
     return {
@@ -78,10 +111,9 @@ def idor_candidate():
         "conditions": [{"kind": "authentication_level", "description": "any valid token"}],
         "severity": {"likelihood": {"level": "high", "rationale": "trivial"}, "impact": {"level": "high", "rationale": "cross-user read"}, "overall": "high"},
         "confidence": "high",
-        "remediation": {"strategy": "call require_owner in get_note", "patch": (
-            "--- a/notesapp/notes.py\n+++ b/notesapp/notes.py\n@@ -14,4 +14,5 @@ def get_note(request, note_id):\n"
-            "     if note is None:\n         return 404, {\"error\": \"not found\"}\n+    require_owner(user, note)\n     return 200, note\n")},
-        "poc_test": {"file_name": "tests/test_idor.py", "language": "python", "code": "def test_bob_cannot_read_alice(): ...", "expectation": "fails before the patch"},
+        "remediation": {"strategy": "call require_owner in get_note", "patch": idor_patch()},
+        "poc_test": {"file_name": "tests/poc_idor.py", "language": "python", "code": IDOR_POC,
+                     "expectation": "exits 1 while bob can read alice's note", "command": "python3 tests/poc_idor.py"},
     }
 
 
@@ -102,6 +134,8 @@ def traversal_candidate():
         "root_cause": "export_note joins an attacker-controlled name to EXPORT_DIR",
         "intended_behavior": "only files inside EXPORT_DIR are readable",
         "remediation": {"strategy": "reject names that resolve outside EXPORT_DIR", "patch": ""},
+        "poc_test": {"file_name": "tests/test_export.py", "language": "python", "code": "# manual check",
+                     "expectation": "reads a file outside EXPORT_DIR"},
     })
     return c
 

@@ -25,6 +25,15 @@ API_ERROR_RE = re.compile(
 
 
 @dataclass
+class HarnessTool:
+    """A backend-neutral tool that the harness implements (for example `sandbox_run`)."""
+    name: str
+    description: str
+    input_schema: dict
+    handler: object  # async (dict) -> dict (JSON-serializable result)
+
+
+@dataclass
 class AgentRequest:
     agent_id: str
     role: str
@@ -36,6 +45,7 @@ class AgentRequest:
     max_turns: int = 60
     timeout_s: int = 1800
     effort: str | None = None
+    tools: list = field(default_factory=list)  # HarnessTool
 
 
 @dataclass
@@ -82,23 +92,39 @@ class ClaudeBackend:
         self.cli_path = cli_path
 
     async def run(self, req: AgentRequest) -> AgentResult:
-        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, query
+        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, create_sdk_mcp_server, query, tool
+
+        mcp_servers, extra = {}, []
+        if req.tools:
+            sdk_tools = []
+            for t in req.tools:
+                def wrap(t=t):
+                    async def run_tool(args):
+                        try:
+                            result = await t.handler(args)
+                            return {"content": [{"type": "text", "text": json.dumps(result, indent=1)}]}
+                        except Exception as exc:  # report to the agent, never crash the session
+                            return {"content": [{"type": "text", "text": f"error: {exc}"}], "is_error": True}
+                    return tool(t.name, t.description, t.input_schema)(run_tool)
+                sdk_tools.append(wrap())
+                extra.append(f"mcp__vharness__{t.name}")
+            mcp_servers["vharness"] = create_sdk_mcp_server("vharness", tools=sdk_tools)
 
         options = ClaudeAgentOptions(
             tools=list(ALLOWED_TOOLS),
-            allowed_tools=list(ALLOWED_TOOLS),
+            allowed_tools=list(ALLOWED_TOOLS) + extra,
             disallowed_tools=list(DENIED_TOOLS),
             permission_mode="dontAsk",
             setting_sources=[],
             strict_mcp_config=True,
-            mcp_servers={},
+            mcp_servers=mcp_servers,
             plugins=[],
             cwd=req.cwd,
             model=req.model,
             system_prompt=req.system,
             max_turns=req.max_turns,
             output_format={"type": "json_schema", "schema": req.schema},
-            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_hook(req.cwd)])]},
+            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_hook(req.cwd, tuple(extra))])]},
             cli_path=self.cli_path,
         )
         if req.effort:
@@ -175,6 +201,8 @@ class ScriptedBackend:
         await asyncio.sleep(0)
         try:
             out = self.responder(req)
+            if asyncio.iscoroutine(out):
+                out = await out
         except Exception as exc:
             return AgentResult(False, error=str(exc), error_kind="backend")
         if isinstance(out, AgentResult):

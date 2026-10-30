@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 
-STAGE_PRIORITY = {"verify": 0, "trace": 1, "validate": 2, "dedup": 3, "gapfill": 4, "hunt": 5, "recon": 6}
+STAGE_PRIORITY = {"verify": 0, "trace": 1, "poc": 2, "validate": 3, "dedup": 4, "gapfill": 5, "hunt": 6, "recon": 7}
 OPEN_TASK = ("queued", "running")
 
 SCHEMA = """
@@ -40,8 +40,13 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE TABLE IF NOT EXISTS records (
   run_id TEXT, target TEXT, fingerprint TEXT, verdict TEXT, data TEXT, validator TEXT,
   verifiers TEXT, reachability TEXT, exposure TEXT, priority TEXT, trace_data TEXT,
-  final INTEGER DEFAULT 0, removed INTEGER DEFAULT 0, depth INTEGER DEFAULT 0,
+  final INTEGER DEFAULT 0, removed INTEGER DEFAULT 0, depth INTEGER DEFAULT 0, poc TEXT,
   PRIMARY KEY (run_id, target, fingerprint)
+);
+CREATE TABLE IF NOT EXISTS sandbox_runs (
+  sbx_id TEXT PRIMARY KEY, run_id TEXT, target TEXT, agent_id TEXT, kind TEXT, command TEXT, files TEXT,
+  copy_target INTEGER, exit_code INTEGER, signal INTEGER, timed_out INTEGER, duration_ms INTEGER,
+  stdout TEXT, stderr TEXT, limits TEXT, env_names TEXT, promoted TEXT, rejected TEXT, error TEXT, created REAL
 );
 CREATE TABLE IF NOT EXISTS consumers (
   run_id TEXT, fingerprint TEXT, source_target TEXT, target TEXT, paths TEXT, reason TEXT,
@@ -261,6 +266,7 @@ class Store:
         r["data"] = json.loads(r["data"])
         r["verifiers"] = json.loads(r["verifiers"] or "[]")
         r["trace_data"] = json.loads(r["trace_data"]) if r["trace_data"] else None
+        r["poc"] = json.loads(r["poc"]) if r.get("poc") else None
         return r
 
     def records(self, run_id, target=None, verdicts=None, include_removed=False):
@@ -276,7 +282,7 @@ class Store:
         return [self._rec(r) for r in self.x(sql + " ORDER BY target, fingerprint", *args)]
 
     def update_record(self, run_id, target, fp, **fields):
-        for k in ("data", "verifiers", "trace_data"):
+        for k in ("data", "verifiers", "trace_data", "poc"):
             if k in fields:
                 fields[k] = _j(fields[k])
         if "data" in fields:
@@ -316,6 +322,30 @@ class Store:
 
     def wishlist(self, run_id):
         return [dict(r) for r in self.x("SELECT * FROM wishlist WHERE run_id=? ORDER BY item_id", run_id)]
+
+    # ---- sandbox runs (SPEC 13.1.4.3) ----
+    def add_sandbox_run(self, run_id, target, agent_id, kind, spec, status, error=None):
+        sbx_id = f"sbx-{self.next_seq('sandbox'):05d}"
+        st = status or {}
+        self.x(
+            "INSERT INTO sandbox_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            sbx_id, run_id, target, agent_id, kind, spec.command, _j([{"path": f["path"], "bytes": len(f["content"])} for f in spec.files]),
+            int(spec.copy_target), st.get("exit_code"), st.get("signal"), int(bool(st.get("timed_out"))), st.get("duration_ms"),
+            st.get("stdout"), st.get("stderr"), _j(st.get("limits")), _j(st.get("env_names")), _j(st.get("promoted", [])),
+            _j(st.get("rejected", [])), error, time.time(),
+        )
+        return sbx_id
+
+    def sandbox_run(self, sbx_id):
+        row = self.x("SELECT * FROM sandbox_runs WHERE sbx_id=?", sbx_id).fetchone()
+        return dict(row) if row else None
+
+    def sandbox_runs(self, run_id, target=None):
+        sql, args = "SELECT * FROM sandbox_runs WHERE run_id=?", [run_id]
+        if target is not None:
+            sql += " AND target=?"
+            args.append(target)
+        return [dict(r) for r in self.x(sql + " ORDER BY sbx_id", *args)]
 
     # ---- invocations ----
     def add_invocation(self, run_id, target, task_id, role, agent_id, model, result, prompt_tokens_est):

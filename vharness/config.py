@@ -51,6 +51,10 @@ class Config:
     dedup_shortlist_max: int = 8
     rejection_notes_per_class: int = 5
     validation_reserve: float = 0.30
+    sandbox: str = "off"  # off | auto | require (SPEC 13.1.1.3)
+    sandbox_limits: dict = field(default_factory=dict)  # overrides for sandbox.Limits
+    sandbox_binds: list = field(default_factory=list)  # extra read-only toolchain directories
+    sandbox_concurrency: int = 4
 
     @property
     def prof(self):
@@ -80,6 +84,8 @@ class Config:
                     "validation model must differ from the discovery model (R-MOD-03); "
                     "pass --allow-same-model to override"
                 )
+        if self.sandbox not in ("off", "auto", "require"):
+            raise ValueError("sandbox must be off, auto or require")
         if self.budget is not None and self.budget < 5:
             raise ValueError("budget must fund 3 recon, 1 critic and 1 validator per target (R-BUD-01)")
 

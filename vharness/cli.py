@@ -36,6 +36,12 @@ def _parser():
     run.add_argument("--max-turns", type=int, default=60)
     run.add_argument("--agent-timeout", type=int, default=1800, help="seconds per agent")
     run.add_argument("--context-window", type=int, default=1_000_000)
+    run.add_argument("--sandbox", choices=("off", "auto", "require"), default="off",
+                     help="execute target code in the sandbox of SPEC 13.1 (needs root; start test before each run)")
+    run.add_argument("--sandbox-limit", action="append", default=[], metavar="NAME=VALUE",
+                     help="sandbox limit override, e.g. wall_s=60, mem_mb=1024, disk_mb=256, nproc=64")
+    run.add_argument("--sandbox-bind", action="append", default=[], metavar="DIR",
+                     help="extra read-only toolchain directory, mounted at the same path")
 
     for name, help_ in (("resume", "continue the last run"), ("status", "show run status"),
                         ("report", "rewrite report files"), ("check", "validate findings.json and coverage-ledger.json")):
@@ -67,7 +73,9 @@ def cmd_run(a):
         discovery_model=a.discovery_model, validation_model=a.validation_model, role_models=role_models,
         allow_same_model=a.allow_same_model, scope=a.scope, prior=a.prior, backend=a.backend,
         effort=None if a.effort == "none" else a.effort, max_turns=a.max_turns, agent_timeout_s=a.agent_timeout,
-        context_window=a.context_window,
+        context_window=a.context_window, sandbox=a.sandbox,
+        sandbox_limits={k: int(v) for k, _, v in (x.partition("=") for x in a.sandbox_limit)},
+        sandbox_binds=a.sandbox_bind,
     )
     h = Harness(a.out, make_backend(a.backend), cfg)
     try:

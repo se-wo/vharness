@@ -57,7 +57,9 @@ POC_TEST = obj({
     "language": STR,
     "code": STR,
     "expectation": STR,
-})
+    "command": STR,  # run from the repository root; exits non-zero when the defect is present
+}, required=["file_name", "language", "code", "expectation"])
+EXECUTION = obj({"run_id": STR, "command": STR, "input": {"type": "string"}, "observed_result": STR})
 REMEDIATION = obj({"strategy": STR, "patch": {"type": "string"}}, required=["strategy", "patch"])
 VALIDATION_PLAN = obj({"local": {"type": "string"}, "deployment": {"type": "string"}}, required=[])
 WISHLIST = {
@@ -82,6 +84,7 @@ RECORD_PROPS = {
     "confidence": LEVEL3,
     "remediation": REMEDIATION,
     "poc_test": POC_TEST,
+    "execution": EXECUTION,
     "claimed_root_cause": STR,
     "blockers": STRS,
     "validation_plan": VALIDATION_PLAN,

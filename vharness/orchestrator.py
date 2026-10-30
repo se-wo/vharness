@@ -9,8 +9,9 @@ import traceback
 import uuid
 
 from . import schemas, stages
-from .prompts import ROOT_PLACEHOLDER
-from .backends import AgentRequest, AgentResult
+from .prompts import ROOT_PLACEHOLDER, SANDBOX
+from .backends import AgentRequest, AgentResult, HarnessTool
+from .sandbox import Limits, RunSpec, Sandbox, SandboxError
 from .budget import Budget
 from .config import Config
 from .ids import agent_id as make_agent_id
@@ -18,7 +19,7 @@ from .knowledge import Knowledge
 from .report import write_reports
 from .store import OPEN_TASK, Store
 
-UPSTREAM_OF_VERIFY = ("recon", "hunt", "gapfill", "dedup", "validate", "trace")
+UPSTREAM_OF_VERIFY = ("recon", "hunt", "gapfill", "dedup", "validate", "poc", "trace")
 
 
 def read_git_head(root):
@@ -76,6 +77,8 @@ class Harness:
             self.run_id = run_id
             self.cfg = Config.from_dict(json.loads(run["config"]))
         self.budget = None
+        self.sandbox = None
+        self._sbx_sem = None
         self.prior_records = {}
         self.prior_exclusions = {}
 
@@ -109,6 +112,7 @@ class Harness:
             names.add(name)
             self.store.add_target(self.run_id, name, root, read_git_head(root), None)
         self.load_prior()
+        self.start_sandbox()
         for t in self.store.targets(self.run_id):
             for focus in ("product", "authority", "surfaces"):
                 self.store.add_task(self.run_id, t["target"], "recon", {"focus": focus, "attempt": 0})
@@ -141,8 +145,87 @@ class Harness:
                 self.store.put_candidate(self.run_id, target, rec["fingerprint"], cand, "prior", [], "primary")
                 self.store.add_task(self.run_id, target, "validate", {"fingerprint": rec["fingerprint"], "attempt": 0})
 
+    def start_sandbox(self):
+        """SPEC 13.1.1.3 / 13.1.2.2: start test before each run; no tool unless every control holds."""
+        if self.cfg.sandbox == "off":
+            self.store.put_doc(self.run_id, "", "sandbox", {"mode": "off", "available": False, "problems": []})
+            return
+        sb = Sandbox(os.path.join(self.out, "sandbox"), Limits(**self.cfg.sandbox_limits), self.cfg.sandbox_binds)
+        root = self.store.targets(self.run_id)[0]["root"]
+        ok, problems = sb.probe(root, os.path.join(self.out, "sandbox", f"probe-{uuid.uuid4().hex[:6]}"))
+        self.store.put_doc(self.run_id, "", "sandbox", {"mode": self.cfg.sandbox, "available": ok, "problems": problems,
+                                                       "limits": sb.limits.__dict__})
+        if ok:
+            self.sandbox = sb
+            self.log(f"sandbox: start test passed; hunters and validators get sandbox_run ({sb.limits.__dict__})")
+            return
+        msg = "sandbox start test failed: " + "; ".join(problems)
+        if self.cfg.sandbox == "require":
+            self.store.set_run_status(self.run_id, "incomplete", "sandbox_start_test_failed")
+            raise ValueError(msg + " (--sandbox require)")
+        self.log(msg + " -> source-only run (--sandbox auto)")
+
+    def sandbox_lookup(self, target):
+        """Lookup for R-SBX-11; None when the sandbox is not in use."""
+        if not self.sandbox:
+            return None
+
+        def lookup(sbx_id):
+            run = self.store.sandbox_run(sbx_id)
+            return run if run and run["run_id"] == self.run_id and run["target"] == target and not run["error"] else None
+        return lookup
+
+    async def sandbox_exec(self, target, agent, kind, spec, artifacts_dir):
+        """Run one sandbox command off the event loop and record it (SPEC 13.1.4.3)."""
+        if self._sbx_sem is None:
+            self._sbx_sem = asyncio.Semaphore(self.cfg.sandbox_concurrency)
+        root = self.store.target_root(self.run_id, target)
+        async with self._sbx_sem:
+            try:
+                status = await asyncio.to_thread(self.sandbox.run, root, spec, artifacts_dir)
+                error = None
+            except SandboxError as exc:
+                status, error = None, str(exc)
+        sbx_id = self.store.add_sandbox_run(self.run_id, target, agent, kind, spec, status, error)
+        return sbx_id, status, error
+
+    def sandbox_tool(self, target, agent):
+        lim = self.sandbox.limits
+
+        async def handler(args):
+            spec = RunSpec(command=args.get("command", ""), files=list(args.get("files") or []), keep=list(args.get("keep") or []),
+                           copy_target=bool(args.get("copy_target")), timeout_s=args.get("timeout_s"))
+            sbx_id, st, error = await self.sandbox_exec(target, agent, "agent", spec,
+                                                        os.path.join(self.out, "agents", agent, "artifacts"))
+            self.log(f"[{target}] sandbox   {agent} {sbx_id} exit={st and st.get('exit_code')} "
+                     f"timeout={st and st.get('timed_out')} {error or ''}".rstrip())
+            if error:
+                return {"run_id": sbx_id, "error": error}
+            return {"run_id": sbx_id, "command": spec.command, "exit_code": st["exit_code"], "signal": st["signal"],
+                    "timed_out": st["timed_out"], "duration_ms": st["duration_ms"],
+                    "stdout": st["stdout"], "stderr": st["stderr"],
+                    "stdout_truncated": st["stdout_bytes"] > len(st["stdout"].encode()),
+                    "kept": [f"agents/{agent}/artifacts/{p['path']}" for p in st["promoted"]], "not_kept": st["rejected"]}
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command (sh -c), run in /scratch."},
+                "files": {"type": "array", "description": "Input files written into /scratch first.",
+                          "items": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                                    "required": ["path", "content"]}},
+                "copy_target": {"type": "boolean", "description": "Copy the target to /scratch/src (writable) and start there."},
+                "keep": {"type": "array", "items": {"type": "string"}, "description": "/scratch-relative files to keep as evidence."},
+                "timeout_s": {"type": "integer", "minimum": 1, "maximum": lim.wall_s},
+            },
+            "required": ["command"],
+        }
+        return HarnessTool("sandbox_run", "Run a shell command in the isolated vharness sandbox (no network, target read-only "
+                           "at /target, writable /scratch, strict limits). Returns run_id, exit code and output.", schema, handler)
+
     def resume(self):
         self.budget = Budget(self.store, self.run_id, self.cfg)
+        self.start_sandbox()
         n = self.store.requeue_running(self.run_id)
         for t in self.store.targets(self.run_id):
             for u in self.store.units(self.run_id, t["target"], "in_progress"):
@@ -185,12 +268,17 @@ class Harness:
         with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
             fh.write(content)
 
-    async def invoke(self, task, role, schema_key, system, prompt, agent_id=None, exclude=()):
+    async def invoke(self, task, role, schema_key, system, prompt, agent_id=None, exclude=(), sandbox=False):
         """Run one agent; retry once on a backend error with a new agent ID (R-RTY-01..03)."""
         target = task["target"]
         model = self.cfg.model_for(role)
         schema = schemas.ROLE_SCHEMAS[schema_key]
         system = system.replace(ROOT_PLACEHOLDER, self.store.target_root(self.run_id, target))
+        use_sandbox = sandbox and self.sandbox is not None
+        if use_sandbox:
+            lim = self.sandbox.limits
+            system += "\n\n" + SANDBOX.format(limits=f"{lim.wall_s}s wall, {lim.cpu_s}s CPU, {lim.mem_mb} MB memory, "
+                                                       f"{lim.nproc} processes, {lim.disk_mb} MB disk")
         result = None
         for attempt in range(2):
             agent = agent_id if (attempt == 0 and agent_id) else self.new_agent_id(role, target)
@@ -200,7 +288,8 @@ class Harness:
             self._write(agent, "prompt.md", f"# role: {role}\n# model: {model}\n# task: {task['task_id']}\n\n## system\n{system}\n\n## prompt\n{prompt}\n")
             req = AgentRequest(agent_id=agent, role=role, model=model, system=system, prompt=prompt, schema=schema,
                                cwd=self.store.target_root(self.run_id, target), max_turns=self.cfg.max_turns,
-                               timeout_s=self.cfg.agent_timeout_s, effort=self.cfg.effort)
+                               timeout_s=self.cfg.agent_timeout_s, effort=self.cfg.effort,
+                               tools=[self.sandbox_tool(target, agent)] if use_sandbox else [])
             self.budget.begin(target)
             try:
                 result = await self.backend.run(req)

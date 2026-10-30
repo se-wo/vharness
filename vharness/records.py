@@ -114,16 +114,35 @@ def drop_empty_forbidden(record):
     return {k: v for k, v in record.items() if not (k in rules["forbidden"] and v in ({}, [], "", None))}
 
 
-def check_record(record, root, evidence_level="source"):
-    """Full mechanical check of a final record. Returns a list of errors."""
+def check_execution(record, sandbox_lookup):
+    """R-REC-12, R-SBX-10/11: local evidence must cite a sandbox run that the harness recorded."""
+    level, ex = record.get("evidence_level"), record.get("execution")
+    if level == "source":
+        return ["a source-level record must not contain 'execution'"] if ex else []
+    if not ex:
+        return ["evidence_level 'local' needs an 'execution' object (R-SBX-10)"]
+    if sandbox_lookup is None:
+        return ["evidence_level 'local' needs the sandbox, which is not in use (R-REC-12)"]
+    run = sandbox_lookup(ex["run_id"])
+    if run is None:
+        return [f"execution.run_id {ex['run_id']!r} is not a recorded sandbox run of this target (R-SBX-11)"]
+    if run["command"] != ex["command"]:
+        return [f"execution.command does not match the recorded command of {ex['run_id']} (R-SBX-11)"]
+    return []
+
+
+def check_record(record, root, sandbox_lookup=None):
+    """Full mechanical check of a final record. Returns a list of errors.
+
+    `sandbox_lookup(run_id)` returns the recorded sandbox run of this target, or None.
+    """
     errors = schemas.validate(record, schemas.RECORD)
     if errors:
         return errors
     verdict = record["verdict"]
     if not valid_fingerprint(record["fingerprint"]):
         errors.append(f"fingerprint {record['fingerprint']!r} does not match the fingerprint pattern")
-    if record.get("evidence_level") != evidence_level:
-        errors.append(f"evidence_level must be {evidence_level!r} (R-REC-12)")
+    errors += check_execution(record, sandbox_lookup)
     errors += check_verdict_fields(record, verdict)
     errors += check_trace_order(record["trace"])
     errors += check_locations(record, root)
@@ -133,11 +152,12 @@ def check_record(record, root, evidence_level="source"):
     return errors
 
 
-def check_candidate(candidate, root):
+def check_candidate(candidate, root, sandbox_lookup=None):
     """Mechanical check of a hunter candidate before dedup and validation."""
     errors = schemas.validate(candidate, schemas.CANDIDATE)
     if errors:
         return errors
+    errors += check_execution(dict(candidate, evidence_level=candidate.get("evidence_level", "source")), sandbox_lookup)
     if not valid_fingerprint(candidate["fingerprint"]):
         errors.append(f"fingerprint {candidate['fingerprint']!r} does not match the fingerprint pattern")
     verdict = candidate["proposed_verdict"]
