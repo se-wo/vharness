@@ -330,6 +330,14 @@ class Harness:
                 self.store.set_stage(self.run_id, target, f"wave:{wave}", "closing")
                 self.store.add_task(self.run_id, target, "gapfill", {"wave": wave})
                 continue
+            # No upstream or verify work open -> one fix task per verified confirmed record (SPEC 13.2.2.1).
+            if (self.cfg.fix and self.sandbox is not None
+                    and not any(x["stage"] in UPSTREAM_OF_VERIFY + ("verify",) for x in open_tasks)):
+                queued = {x["payload"]["fingerprint"] for x in open_tasks if x["stage"] == "fix"}
+                for rec in self.store.records(self.run_id, target, ["confirmed"]):
+                    if rec["final"] and rec["fingerprint"] not in queued and not self.store.fix(self.run_id, target, rec["fingerprint"]):
+                        order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}.get(rec["priority"], 5)
+                        self.store.add_task(self.run_id, target, "fix", {"fingerprint": rec["fingerprint"], "attempt": 0}, priority=order)
             # No upstream work open -> verify each unverified record.
             if self.cfg.prof.separate_verify and not any(x["stage"] in UPSTREAM_OF_VERIFY for x in open_tasks):
                 queued = {x["payload"]["fingerprint"] for x in open_tasks if x["stage"] == "verify"}

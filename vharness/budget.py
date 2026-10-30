@@ -36,7 +36,7 @@ class Budget:
 
     def per_candidate(self):
         """Calls one candidate needs after it is found: validate, trace, and verify unless merged."""
-        return 2 + (1 if self.cfg.prof.separate_verify else 0)
+        return 2 + (1 if self.cfg.prof.separate_verify else 0) + (1 if self.cfg.fix else 0)
 
     def downstream_demand(self, target, exclude_task=None):
         """Agent calls still owed to work already found or being found (SPEC 10.2 step 4).

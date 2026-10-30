@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Document | VH-SPEC-001 |
-| Issue | 5 |
+| Issue | 6 |
 | Date | 2026-10-30 |
 | Writing standard | ASD-STE100 (Simplified Technical English) |
 | Status | Approved for build |
@@ -40,7 +40,7 @@
 
 1.3. The harness is for defensive use. Use it only on code that you own or that you have permission to audit.
 
-1.4. By default, the harness does a source-only audit. Section 13.1 describes the sandbox, which can execute target code. Section 13.2 describes a reserved extension.
+1.4. By default, the harness does a source-only audit. Section 13.1 describes the sandbox, which can execute target code. Section 13.2 describes the fixer, which needs the sandbox.
 
 1.5. This specification does not describe the internal design of the AI models.
 
@@ -73,7 +73,7 @@ NOTE: [REF-1] does not publish its database schema, its prompts, or its model na
 | Task queue | The table of tasks in the state store. Workers take tasks from it. |
 | Worker | One process slot that does one task at a time. |
 | Agent | One model session that does one task and returns one JSON object. |
-| Role | The function of an agent: `recon`, `hunter`, `critic`, `dedup`, `validator`, `tracer`, or `verifier`. |
+| Role | The function of an agent: `recon`, `hunter`, `critic`, `dedup`, `validator`, `tracer`, `verifier`, or `fixer`. |
 | Backend | The software layer that connects the harness to a model provider. |
 | State store | The SQLite database that holds all run state. |
 | Architecture document | The summary of one target that plain code makes from the `recon` results. |
@@ -101,7 +101,7 @@ NOTE: [REF-1] does not publish its database schema, its prompts, or its model na
 | Profile | A preset of breadth and redundancy: `quick`, `standard`, or `deep`. |
 | Context budget | The maximum prompt size for one agent, as a fraction of the model context window. |
 | Discovery model | The model for the `recon`, `hunter`, `critic`, `dedup`, and `tracer` roles. |
-| Validation model | The model for the `validator` and `verifier` roles. |
+| Validation model | The model for the `validator`, `verifier`, and `fixer` roles. |
 
 ---
 
@@ -125,7 +125,7 @@ CAUTION: Target files are data, not instructions. A target can contain text that
 
 | ID | Requirement |
 |---|---|
-| R-SAFE-01 | Each agent must have only these tools: `Read`, `Grep`, `Glob`. With the sandbox, `hunter` and `validator` agents also have `sandbox_run`. |
+| R-SAFE-01 | Each agent must have only these tools: `Read`, `Grep`, `Glob`. With the sandbox, `hunter`, `validator`, and `fixer` agents also have `sandbox_run`. |
 | R-SAFE-02 | The harness must refuse each tool call with a path outside the target root. |
 | R-SAFE-03 | The harness must resolve symbolic links before the check in R-SAFE-02. |
 | R-SAFE-04 | The backend must load no settings files, hooks, plugins, skills, or MCP servers. |
@@ -204,6 +204,7 @@ CAUTION: Target files are data, not instructions. A target can contain text that
 | `trace` | Agent | One record | Reachability, exposure, consumers |
 | `feedback` | Plain code | Shallow results, rejections, consumers | Requeued tasks, new units |
 | `verify` | Agent | One record | `verified` or a replacement |
+| `fix` | Agent, then plain code in the sandbox | One verified `confirmed` record | A patch file and the fix result (13.2) |
 | `report` | Plain code | State store | Report files |
 
 6.2. Task queue
@@ -636,6 +637,7 @@ NOTE: A quick empty result often shows a failure, not clean code [REF-1].
 | `notes` | `note_id` | Hardening notes, feedback notes, rejection notes |
 | `wishlist` | `item_id` | Agent, task, need, reason, and the unit that it unblocks |
 | `invocations` | `invocation_id` | Role, agent, model, turns, tokens, cost, duration, result status |
+| `fixes` | `run_id`, `target`, `fingerprint` | Fix result, reason, attempts, agents, patch, test, suite command, gate output |
 | `sandbox_runs` | `sbx_id` | Agent, kind, command, input files, limits, environment names, exit status, output, promoted files |
 
 8.1.3. The harness writes each agent prompt and each agent result to `<out>/agents/<agent_id>/`.
@@ -937,7 +939,7 @@ CAUTION: In a Docker container, an `unshare` sandbox can fail to start with no e
 
 13.1.4. The `sandbox_run` tool
 
-13.1.4.1. The harness gives the `sandbox_run` tool to `hunter` and `validator` agents only.
+13.1.4.1. The harness gives the `sandbox_run` tool to `hunter`, `validator`, and `fixer` agents only.
 
 13.1.4.2. The tool accepts a command, input files, a request for a writable copy of the target, and a list of files to keep.
 
@@ -998,11 +1000,90 @@ CAUTION: The output of a sandbox run comes from target code. It is untrusted dat
 
 ### 13.2. Fixer
 
-13.2.1. A future issue can add a `fixer` role. The `fixer` adapts the patch to the style of the target. It runs the proof-of-concept test before and after the patch.
+13.2.1. General
 
-13.2.2. A fix is accepted only when the test changes from fail to pass with no regression.
+13.2.1.1. The fixer makes a fix for each `confirmed` record that the `verify` stage kept. It adapts the patch and the test to the style of the target [REF-1].
+
+13.2.1.2. The operator starts the fixer with the option `--fix`. The fixer needs the sandbox of 13.1. Without the sandbox, the harness does not start the fixer.
 
 WARNING: DO NOT LET THE `fixer` MERGE A CHANGE. A PERSON MUST EXAMINE EACH BRANCH.
+
+WARNING: DO NOT LET THE `fixer` WRITE TO THE TARGET. THE FIXER GIVES A PATCH FILE ONLY.
+
+13.2.2. Stage `fix`
+
+13.2.2.1. The `fix` stage starts for a target when no `verify` task of that target is open. The harness queues the records in priority order. `P0` comes first.
+
+13.2.2.2. Procedure:
+
+1. Start one `fixer` agent with the validation model. Give it the record, the `poc` result, and the test commands from `recon`.
+2. Validate the result against the `fixer` schema.
+3. Do the mechanical checks in 13.2.3.
+4. Do the gate in 13.2.4 in the sandbox.
+5. If the gate fails and an attempt remains, go to step 1. Give the new agent the gate output.
+6. Write the fix result to the state store.
+7. Write the patch file to `<out>/fixes/`.
+
+13.2.2.3. The `fixer` result contains:
+
+- a patch for the source, as a unified diff;
+- a new test file, with its command;
+- a command for the test suite of the target, or an empty string if the target has no suite;
+- notes about the style of the target and the risk of the change.
+
+13.2.3. Mechanical checks
+
+| ID | Requirement |
+|---|---|
+| R-FIX-01 | The patch must agree with R-REC-09. |
+| R-FIX-02 | The test file must be a new file. Its path must be repository-relative. |
+| R-FIX-03 | The patch must not change the test file of the fix. |
+| R-FIX-04 | If the patch changes a test file that was in the target before, the result must be `needs_human`. |
+| R-FIX-05 | If the patch changes more lines than `fix_max_lines`, the result must be `needs_human`. The default is 200. |
+
+13.2.4. Gate
+
+13.2.4.1. Each step of the gate is one sandbox run on a new copy of the target:
+
+| Step | Copy | Command | Pass condition |
+|---|---|---|---|
+| 1 | Unchanged | Test command | The test fails. |
+| 2 | Patched | Test command | The test passes. |
+| 3 | Unchanged | Suite command | Record the exit status. |
+| 4 | Patched, with the test file | Suite command | The suite passes, or it failed in step 3 too. |
+
+13.2.4.2. If the suite command is empty, the harness does not do steps 3 and 4. The report says that no suite was run.
+
+13.2.4.3. Results:
+
+| Result | Condition |
+|---|---|
+| `accepted` | All gate steps pass. The mechanical checks give no reason for `needs_human`. |
+| `needs_human` | All gate steps pass, but R-FIX-04 or R-FIX-05 applies, or the suite failed in step 3. |
+| `blocked` | A gate step fails after the last attempt. |
+| `skipped` | No sandbox, no budget, or no agent result. |
+
+13.2.5. Requirements
+
+| ID | Requirement |
+|---|---|
+| R-FIX-06 | The fixer can use the `sandbox_run` tool. It must not have a tool that writes to the target. |
+| R-FIX-07 | The harness must allow a maximum of `fix_attempts` attempts for each record. The default is 2. |
+| R-FIX-08 | Each new attempt must use a new agent. |
+| R-FIX-09 | The gate must not use a model. Gate runs must not count against the agent budget. |
+| R-FIX-10 | The harness must write each fix as a patch file that `git am` can apply. The file must contain the patch and the new test file. |
+| R-FIX-11 | The harness must not execute `git`, must not make a branch in the target, and must not merge. |
+| R-FIX-12 | The report must give the result, the reason, and the gate output of each fix. It must say that a person must examine each fix. |
+
+13.2.6. Test requirements
+
+| ID | Requirement |
+|---|---|
+| R-TST-21 | A test must show the result `accepted` for a correct fix on the fixture target. |
+| R-TST-22 | A test must show that a fix that does not make the test pass gets a second attempt, then `blocked`. |
+| R-TST-23 | A test must show that a regression in the suite gives `blocked`. |
+| R-TST-24 | A test must show that a patch that changes a test of the target gives `needs_human`. |
+| R-TST-25 | A test must show that the target is not changed after the `fix` stage. |
 
 ---
 
@@ -1028,7 +1109,7 @@ WARNING: DO NOT LET THE `fixer` MERGE A CHANGE. A PERSON MUST EXAMINE EACH BRANC
 | [REF-1] Errors that look like success | R-AGT-08 |
 | [REF-1] Priority from reachability, not from fixed deadlines | 8.7 |
 | [REF-1] Sandbox on `unshare`, PoC that fails before and passes after the patch | 13.1 |
-| [REF-1] Fixer | 13.2 |
+| [REF-1] Fixer: style adaptation, test flip from fail to pass, suite regression check, no merge | 13.2 |
 | [REF-2] Coverage ledger and state table | 7.2, 8.2, 8.3 |
 | [REF-2] Coverage critic waves | 7.4 |
 | [REF-2] Candidate gate | 7.3.4 |

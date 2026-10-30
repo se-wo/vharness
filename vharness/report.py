@@ -261,6 +261,19 @@ def write_reports(store, run_id, out):
     for row in store.cost_by_role(run_id):
         L.append(f"| {row['role']} | {row['model']} | {row['n']} | {row['ok']} | {row['input_tokens'] or 0} | {row['output_tokens'] or 0} | {row['cost_usd']:.3f} |")
     L += ["", f"Total: ${store.cost(run_id):.3f}", ""]
+    fixes = store.fixes(run_id)
+    if cfg.get("fix"):
+        L += ["## 10. Fixes (review required; vharness never merges)", ""]
+        if fixes:
+            L += ["Each fix is a `git am`-ready patch in `fixes/`. A person must review every fix before it is merged (R-FIX-12).", "",
+                  "| Result | Target | Record | Reason | Patch file |", "|---|---|---|---|---|"]
+            titles = {(f["target"], f["record"]["fingerprint"]): f["record"]["title"] for f in confirmed}
+            for fx in fixes:
+                L.append(f"| {fx['status']} | {fx['target']} | {_md_escape(titles.get((fx['target'], fx['fingerprint']), fx['fingerprint']))} | "
+                         f"{_md_escape(fx['reason'])} | {('`' + fx['patch_file'] + '`') if fx['patch_file'] else '-'} |")
+        else:
+            L.append("No fix was made.")
+        L.append("")
     if errors:
         L += ["## Output check errors", ""] + [f"- {e}" for e in errors[:50]] + [""]
     write("REPORT.md", "\n".join(L))
@@ -318,6 +331,35 @@ def write_reports(store, run_id, out):
                 N += ["", f"**{k.capitalize()} plan:** {r['validation_plan'][k]}"]
         N.append("")
     write("NEEDS-VALIDATION.md", "\n".join(N))
+
+    # FIXES.md
+    if cfg.get("fix"):
+        X = ["# Fixes", "", "Every fix needs review by a person. vharness never writes to the target, never runs git, and never merges.", ""]
+        for fx in fixes:
+            X += [f"## {fx['fingerprint']} — {fx['status']}", "", f"`{fx['target']}` · {fx['reason']}", ""]
+            if fx["patch_file"]:
+                X += [f"Patch: `{fx['patch_file']}` (apply on a review branch with `git am`)", ""]
+            if fx["test"]:
+                X += [f"Regression test: `{fx['test']['file_name']}`, command `{fx['test']['command']}`",
+                      f"Suite command: `{fx['suite_command'] or '(none)'}`", ""]
+            if fx["notes"]:
+                X += [f"Style notes: {fx['notes'].get('style') or '-'}", "", f"Risk notes: {fx['notes'].get('risk') or '-'}", ""]
+            for a in fx["attempts"] or []:
+                X += [f"### Attempt {a['attempt']} ({a.get('agent')})", ""]
+                if a.get("error"):
+                    X += [f"- {a['error']}"]
+                for e in a.get("errors", []):
+                    X += [f"- mechanical: {e}"]
+                for step, st in (a.get("gate") or {}).items():
+                    X += [f"- {step} (`{st['run_id']}`): {st.get('error') or 'exit ' + str(st.get('exit_code'))}"
+                          + (", timed out" if st.get("timed_out") else "")]
+                    tail = ((st.get("stdout") or "") + (st.get("stderr") or ""))[-600:].rstrip()
+                    if tail:
+                        X += ["", "```text", tail, "```", ""]
+                X.append("")
+            if fx["patch"]:
+                X += ["### Patch", "", "```diff", fx["patch"].rstrip("\n"), "```", ""]
+        write("FIXES.md", "\n".join(X) + "\n")
 
     # WISHLIST.md
     W = ["# Wishlist", "", "Resources that agents asked for. Supplying one lets the affected work run again.", ""]

@@ -3,7 +3,7 @@
 from dataclasses import asdict, dataclass, field
 
 DISCOVERY_ROLES = ("recon", "hunter", "critic", "dedup", "tracer")
-VALIDATION_ROLES = ("validator", "verifier")
+VALIDATION_ROLES = ("validator", "verifier", "fixer")
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,9 @@ class Config:
     sandbox_limits: dict = field(default_factory=dict)  # overrides for sandbox.Limits
     sandbox_binds: list = field(default_factory=list)  # extra read-only toolchain directories
     sandbox_concurrency: int = 4
+    fix: bool = False  # SPEC 13.2
+    fix_attempts: int = 2
+    fix_max_lines: int = 200
 
     @property
     def prof(self):
@@ -86,6 +89,10 @@ class Config:
                 )
         if self.sandbox not in ("off", "auto", "require"):
             raise ValueError("sandbox must be off, auto or require")
+        if self.fix and self.sandbox == "off":
+            raise ValueError("--fix needs the sandbox (SPEC 13.2.1.2); use --sandbox auto or require")
+        if self.fix_attempts < 1:
+            raise ValueError("fix_attempts must be at least 1")
         if self.budget is not None and self.budget < 5:
             raise ValueError("budget must fund 3 recon, 1 critic and 1 validator per target (R-BUD-01)")
 

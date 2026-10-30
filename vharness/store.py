@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 
-STAGE_PRIORITY = {"verify": 0, "trace": 1, "poc": 2, "validate": 3, "dedup": 4, "gapfill": 5, "hunt": 6, "recon": 7}
+STAGE_PRIORITY = {"fix": 0, "verify": 1, "trace": 2, "poc": 3, "validate": 4, "dedup": 5, "gapfill": 6, "hunt": 7, "recon": 8}
 OPEN_TASK = ("queued", "running")
 
 SCHEMA = """
@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS records (
   run_id TEXT, target TEXT, fingerprint TEXT, verdict TEXT, data TEXT, validator TEXT,
   verifiers TEXT, reachability TEXT, exposure TEXT, priority TEXT, trace_data TEXT,
   final INTEGER DEFAULT 0, removed INTEGER DEFAULT 0, depth INTEGER DEFAULT 0, poc TEXT,
+  PRIMARY KEY (run_id, target, fingerprint)
+);
+CREATE TABLE IF NOT EXISTS fixes (
+  run_id TEXT, target TEXT, fingerprint TEXT, status TEXT, reason TEXT, attempts TEXT, patch TEXT, test TEXT,
+  suite_command TEXT, notes TEXT, patch_file TEXT, updated REAL,
   PRIMARY KEY (run_id, target, fingerprint)
 );
 CREATE TABLE IF NOT EXISTS sandbox_runs (
@@ -322,6 +327,30 @@ class Store:
 
     def wishlist(self, run_id):
         return [dict(r) for r in self.x("SELECT * FROM wishlist WHERE run_id=? ORDER BY item_id", run_id)]
+
+    # ---- fixes (SPEC 13.2) ----
+    def put_fix(self, run_id, target, fp, status, reason, attempts, patch=None, test=None, suite_command=None,
+                notes=None, patch_file=None):
+        self.x("INSERT OR REPLACE INTO fixes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", run_id, target, fp, status, reason,
+               _j(attempts), patch, _j(test), suite_command, _j(notes), patch_file, time.time())
+
+    def fix(self, run_id, target, fp):
+        row = self.x("SELECT * FROM fixes WHERE run_id=? AND target=? AND fingerprint=?", run_id, target, fp).fetchone()
+        return self._fix(row) if row else None
+
+    @staticmethod
+    def _fix(row):
+        f = dict(row)
+        for k in ("attempts", "test", "notes"):
+            f[k] = json.loads(f[k]) if f[k] else None
+        return f
+
+    def fixes(self, run_id, target=None):
+        sql, args = "SELECT * FROM fixes WHERE run_id=?", [run_id]
+        if target is not None:
+            sql += " AND target=?"
+            args.append(target)
+        return [self._fix(r) for r in self.x(sql + " ORDER BY target, fingerprint", *args)]
 
     # ---- sandbox runs (SPEC 13.1.4.3) ----
     def add_sandbox_run(self, run_id, target, agent_id, kind, spec, status, error=None):

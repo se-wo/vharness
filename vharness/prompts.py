@@ -391,3 +391,48 @@ def verifier_prompt(target, record, note=None, poc=None, runs=None):
         parts.append("## Context\n" + note)
     parts.append(VERIFIER_TASK)
     return (system_prompt("Your role is VERIFIER: an independent final reviewer of one record."), "\n\n".join(parts))
+
+
+# --------------------------------------------------------------------------- fixer (SPEC 13.2)
+
+FIXER_TASK = """\
+Write the smallest fix for this verified vulnerability, in the style of this repository.
+
+1. Read the code around the sink and the strongest control on the path. Fix the invariant
+   at the last trusted decision point. Keep the behavior for legitimate callers.
+2. Match the repository: naming, error handling (raise the same exception types, return
+   the same status shapes), import style, comments. Reuse existing helpers, such as the
+   control a sibling path already calls.
+3. Do not change existing tests, test fixtures, CI, build or dependency files, or
+   unrelated code. Do not refactor. A patch that edits existing tests or changes more
+   than {max_lines} lines goes to a human instead of being accepted.
+4. Write ONE new regression test file (`test.file_name`, a path that does not exist yet,
+   in the repository's test layout) and `test.command`, which runs it offline from the
+   repository root and exits non-zero while the defect is present.
+5. `suite_command` runs the repository's existing tests offline from the root (use the
+   recon test commands below if they work in the sandbox; plain `python3 -m pytest` only
+   if pytest is available there). Use "" if there is no runnable suite.
+6. `patch` is a unified diff against the current files, paths prefixed `a/` and `b/`,
+   applicable with `patch -p1`. It must not create or touch the test file.
+
+Before you answer, check your work with `sandbox_run` (copy_target: true): apply the patch
+with `patch -p1 < file`, run the test on an unpatched and a patched copy, and run the
+suite. The harness then runs the same gate itself: the test must fail before and pass
+after the patch, and the suite must not regress. You never write to the repository;
+a person reviews and merges every fix."""
+
+
+def fixer_prompt(target, architecture, record, poc, test_commands, previous=None, max_lines=200):
+    parts = [
+        f"Target repository: `{target}` (your working directory).",
+        "## Architecture document\n" + architecture,
+        "## Verified record\n" + _json(record),
+    ]
+    if poc:
+        parts.append("## Harness PoC result for the record's own test\n" + _json(poc))
+    parts.append("## Test commands found by recon\n" + (_json(test_commands) if test_commands else "(none)"))
+    if previous:
+        parts.append("## Previous fix attempt failed the harness gate (a different agent wrote it)\n" + _json(previous))
+    parts.append(FIXER_TASK.format(max_lines=max_lines))
+    return (system_prompt("Your role is FIXER: turn one verified vulnerability into a reviewable, minimal fix with a regression test."),
+            "\n\n".join(parts))

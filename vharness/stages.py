@@ -8,7 +8,7 @@ import os
 import re
 from collections import Counter, defaultdict
 
-from . import prompts, records, schemas
+from . import fixer, prompts, records, schemas
 from .ids import QUICK_SUBSYSTEM, coverage_id, valid_fingerprint
 from .sandbox import RunSpec, poc_result, poc_script
 
@@ -810,5 +810,81 @@ async def verify(h, task):
     return "done"
 
 
+# =========================================================================== fix (SPEC 13.2)
+
+async def fix(h, task):
+    target, p = task["target"], task["payload"]
+    fp, attempt = p["fingerprint"], p.get("attempt", 0)
+    rec = h.store.record(h.run_id, target, fp)
+    if not rec or rec["removed"] or not rec["final"] or rec["verdict"] != "confirmed":
+        return "done"
+    history = list(p.get("history", []))
+    if h.sandbox is None:
+        h.store.put_fix(h.run_id, target, fp, "skipped", "the sandbox is not in use", history)
+        return "skipped"
+    if not h.budget.can_spend(target):
+        h.store.put_fix(h.run_id, target, fp, "skipped", "no agent budget left for the fixer", history)
+        return "skipped"
+    root = h.store.target_root(h.run_id, target)
+    product = h.store.doc(h.run_id, target, "recon:product", parse=True) or {}
+    system, prompt = prompts.fixer_prompt(target, h.store.doc(h.run_id, target, "architecture") or "", rec["data"], rec["poc"],
+                                          product.get("build_and_test_commands", []), p.get("previous"), h.cfg.fix_max_lines)
+    exclude = [a for a in history_agents(history)]
+    result, agent = await h.invoke(task, "fixer", "fixer", system, prompt, exclude=exclude, sandbox=True)  # R-FIX-08: new agent
+    entry = {"attempt": attempt + 1, "agent": agent}
+    if not result.ok:
+        entry["error"] = f"agent failed: {result.error}"
+        return _fix_next(h, target, fp, attempt, history + [entry], entry["error"], None)
+    out = result.output
+    h.record_wishlist(task, target, agent, out.get("wishlist", []))
+    errors, human = fixer.mechanical(out, root, h.cfg.fix_max_lines)
+    if errors:
+        entry["errors"] = errors
+        return _fix_next(h, target, fp, attempt, history + [entry], "mechanical: " + "; ".join(errors), out)
+    passed, reason, steps, baseline_failing = await fixer.run_gate(h, target, out)
+    entry["gate"] = steps
+    if not passed:
+        return _fix_next(h, target, fp, attempt, history + [entry], reason, out, steps)
+    if baseline_failing:
+        human.append("the suite already fails on unchanged code, so a regression cannot be ruled out")
+    status = "needs_human" if human else "accepted"
+    reason = "; ".join(human) if human else ("gate passed: the test fails before and passes after the patch"
+                                              + ("; the suite passes" if "suite_patched" in steps else "; no suite was run"))
+    _write_fix(h, target, rec, status, reason, history + [entry], out, steps)
+    return "done"
+
+
+def history_agents(history):
+    return [e["agent"] for e in history if e.get("agent")]
+
+
+def _fix_next(h, target, fp, attempt, history, reason, out, steps=None):
+    """Retry with a fresh agent and the gate output (R-FIX-07/08), or block."""
+    if attempt + 1 < h.cfg.fix_attempts:
+        previous = {"reason": reason, "patch": out and out["patch"], "test": out and out["test"],
+                    "suite_command": out and out["suite_command"], "gate": steps}
+        h.store.add_task(h.run_id, target, "fix", {"fingerprint": fp, "attempt": attempt + 1, "history": history,
+                                                   "previous": previous}, priority=0)
+        return "failed"
+    rec = h.store.record(h.run_id, target, fp)
+    if out:
+        _write_fix(h, target, rec, "blocked", reason, history, out, steps or {})
+    else:
+        h.store.put_fix(h.run_id, target, fp, "blocked", reason, history)
+    return "failed"
+
+
+def _write_fix(h, target, rec, status, reason, history, out, steps):
+    """Store the fix and write a `git am` patch file (R-FIX-10). Nothing is written to the target (R-FIX-11)."""
+    d = os.path.join(h.out, "fixes")
+    os.makedirs(d, exist_ok=True)
+    name = fixer.patch_filename(len(h.store.fixes(h.run_id)) + 1, status, rec["fingerprint"])
+    with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
+        fh.write(fixer.mbox(rec["data"], out["patch"], out["test"], out["suite_command"], status, reason, steps))
+    h.store.put_fix(h.run_id, target, rec["fingerprint"], status, reason, history, out["patch"], out["test"],
+                    out["suite_command"], {"style": out.get("style_notes"), "risk": out.get("risk_notes")}, f"fixes/{name}")
+    h.log(f"[{target}] fix       {rec['fingerprint']}: {status} ({reason})")
+
+
 HANDLERS = {"recon": recon, "hunt": hunt, "gapfill": gapfill, "dedup": dedup, "validate": validate, "poc": poc,
-            "trace": trace, "verify": verify}
+            "trace": trace, "verify": verify, "fix": fix}

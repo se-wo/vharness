@@ -202,6 +202,16 @@ VERIFIER = obj({
     "record": RECORD,
 }, required=["decision", "fingerprint", "reason"])
 
+# ---- fixer (SPEC 13.2.2.3) ----
+FIXER = obj({
+    "patch": STR,
+    "test": obj({"file_name": STR, "language": STR, "code": STR, "command": STR}),
+    "suite_command": {"type": "string"},
+    "style_notes": {"type": "string"},
+    "risk_notes": {"type": "string"},
+    "wishlist": WISHLIST,
+}, required=["patch", "test", "suite_command", "style_notes", "risk_notes"])
+
 ROLE_SCHEMAS = {
     "recon:product": RECON_PRODUCT,
     "recon:authority": RECON_AUTHORITY,
@@ -212,6 +222,7 @@ ROLE_SCHEMAS = {
     "validator": VALIDATOR,
     "tracer": TRACER,
     "verifier": VERIFIER,
+    "fixer": FIXER,
 }
 
 

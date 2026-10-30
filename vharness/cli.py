@@ -40,6 +40,8 @@ def _parser():
                      help="execute target code in the sandbox of SPEC 13.1 (needs root; start test before each run)")
     run.add_argument("--sandbox-limit", action="append", default=[], metavar="NAME=VALUE",
                      help="sandbox limit override, e.g. wall_s=60, mem_mb=1024, disk_mb=256, nproc=64")
+    run.add_argument("--fix", action="store_true", help="run the fixer on verified confirmed records (SPEC 13.2; needs --sandbox)")
+    run.add_argument("--fix-attempts", type=int, default=2)
     run.add_argument("--sandbox-bind", action="append", default=[], metavar="DIR",
                      help="extra read-only toolchain directory, mounted at the same path")
 
@@ -75,7 +77,7 @@ def cmd_run(a):
         effort=None if a.effort == "none" else a.effort, max_turns=a.max_turns, agent_timeout_s=a.agent_timeout,
         context_window=a.context_window, sandbox=a.sandbox,
         sandbox_limits={k: int(v) for k, _, v in (x.partition("=") for x in a.sandbox_limit)},
-        sandbox_binds=a.sandbox_bind,
+        sandbox_binds=a.sandbox_bind, fix=a.fix, fix_attempts=a.fix_attempts,
     )
     h = Harness(a.out, make_backend(a.backend), cfg)
     try:

@@ -206,6 +206,86 @@ class FakeModel:
         return {"reachability": "reachable", "exposure": "exploitable_now", "external_entrypoint": "HTTP",
                 "call_path": [{"file": "notesapp/app.py", "line": 1, "description": "dispatch"}], "rationale": "public route"}
 
+    def fixer(self, req):
+        return fix_output(record_fingerprint(req.prompt))
+
     def verifier(self, req):
         rec = section_json(req.prompt, "Record")
         return {"decision": "verified", "fingerprint": rec["fingerprint"], "reason": "re-checked"}
+
+
+# ---- fixer helpers (SPEC 13.2 tests)
+
+def _diff(rel, transform):
+    import difflib
+    path = os.path.join(FIXTURES, "notesapp", rel)
+    old = open(path).read().splitlines(keepends=True)
+    new = transform(list(old))
+    return "".join(difflib.unified_diff(old, new, f"a/{rel}", f"b/{rel}"))
+
+
+def _insert_after(lines, needle, extra, before=False):
+    out = []
+    for line in lines:
+        if before and line.strip() == needle:
+            out += extra
+        out.append(line)
+        if not before and line.strip() == needle:
+            out += extra
+    return out
+
+
+def idor_fix_patch():
+    return _diff("notesapp/notes.py", lambda l: _insert_after(l, "return 200, note", ["    require_owner(user, note)\n"], before=True))
+
+
+def traversal_fix_patch():
+    def t(lines):
+        out = []
+        for line in lines:
+            if line.strip() == "path = os.path.join(storage.EXPORT_DIR, name)":
+                out += ["    base = os.path.realpath(storage.EXPORT_DIR)\n",
+                        "    path = os.path.realpath(os.path.join(base, name))\n",
+                        "    if os.path.commonpath([path, base]) != base:\n",
+                        "        return 403, {\"error\": \"forbidden\"}\n"]
+            else:
+                out.append(line)
+        return out
+    return _diff("notesapp/notes.py", t)
+
+
+TRAVERSAL_TEST = """import sys
+sys.path.insert(0, ".")
+from notesapp import notes
+
+
+class Req:
+    headers = {"Authorization": "Bearer change-me-b"}
+    args = {"name": "/etc/hosts"}
+
+
+try:
+    status, body = notes.export_note(Req())
+except OSError:
+    sys.exit(0)
+sys.exit(1 if status == 200 else 0)
+"""
+
+SUITE = ("python3 -c \"import sys; sys.path.insert(0, '.'); import tests.test_notes as t; "
+         "t.test_list_only_own(); print('suite ok')\"")
+
+
+def fix_output(fingerprint, patch=None):
+    if fingerprint.startswith("idor"):
+        return {"patch": patch or idor_fix_patch(),
+                "test": {"file_name": "tests/test_regression_idor.py", "language": "python", "code": IDOR_POC,
+                         "command": "python3 tests/test_regression_idor.py"},
+                "suite_command": SUITE, "style_notes": "reuses require_owner like delete_note", "risk_notes": "none", "wishlist": []}
+    return {"patch": patch or traversal_fix_patch(),
+            "test": {"file_name": "tests/test_regression_export.py", "language": "python", "code": TRAVERSAL_TEST,
+                     "command": "python3 tests/test_regression_export.py"},
+            "suite_command": SUITE, "style_notes": "returns (status, body) like other handlers", "risk_notes": "none", "wishlist": []}
+
+
+def record_fingerprint(prompt):
+    return section_json(prompt, "Verified record")["fingerprint"]
