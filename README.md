@@ -8,8 +8,9 @@ architecture. It also uses the methodology and attack-class knowledge of
 [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill) (MIT; vendored in
 `vharness/knowledge/`). The specification is [`SPEC.md`](SPEC.md), written in ASD-STE100 Simplified Technical English.
 
-> Defensive use only. Audit code that you own or are authorized to audit. Issue 1 is **source-only**:
-> agents never execute target code.
+> Defensive use only. Audit code that you own or are authorized to audit. By default the audit is
+> **source-only**: no target code runs. With `--sandbox auto|require`, target code runs only inside the
+> sandbox of SPEC 13.1.
 
 ## Pipeline
 
@@ -33,6 +34,7 @@ recon (3 agents) ─► plan (code) ─► ┌───────────�
 | gapfill | critic agent | thin (subsystem × class) cells, reassignments; waves until no new work |
 | dedup | code index + agent | shortlist by trace scopes/sink/boundary/rare tokens; "would one fix close both?" |
 | validate | mechanical checks, then agent (validation model) | tries to disprove; can only decide on its candidate |
+| poc | code, in the sandbox | PoC test must fail on an unchanged copy and pass on a patched copy (only with `--sandbox`) |
 | trace | agent + code symbol index | reachability, exposure (`exploitable_now`/`latent`/`wrong_component`), consumers in other targets |
 | feedback | code | shallow results requeued with a sharper prompt; rejection lessons fed to later hunters |
 | verify | fresh agent (validation model) | independent re-check of every confirmed and needs_validation record |
@@ -46,6 +48,27 @@ recon (3 agents) ─► plan (code) ─► ┌───────────�
 - The harness never runs `git` in a target. It reads `.git/HEAD` directly, because `git status` can execute `core.fsmonitor` or filter commands from the target's config.
 - Output must be outside every target. The harness never writes to a target.
 - An API error returned as text in a "successful" response is classified as an error and retried, not counted as an empty success.
+
+## Sandboxed execution (`--sandbox`)
+
+With `--sandbox auto` or `--sandbox require`, the harness runs a start test before each run. If every control holds,
+hunters and validators get a `sandbox_run` tool, and a plain-code `poc` stage runs each confirmed PoC test.
+
+| Control | How |
+|---|---|
+| No network | new network namespace with no interface up |
+| Empty environment | only `PATH`, `HOME=/scratch`, `TMPDIR`, `LANG`, two Python flags |
+| Read-only target and toolchain | new root on tmpfs; `/usr`, `/lib*`, `/bin`, `/sbin` and the target are bind-mounted read-only, `nosuid`, `nodev`; `/etc` is synthetic |
+| Writes only to scratch | fresh size-limited tmpfs at `/scratch`; the new root itself is read-only |
+| Limits | CPU, address space, processes (per fresh uid), file size, open files, disk (tmpfs size), wall clock |
+| Process cleanup | new PID namespace; init kills and reaps everything when the command ends or times out |
+| No privileges | fresh unprivileged uid per run, `no_new_privs`, no capabilities |
+| Evidence promotion | trusted init copies only allowlisted files, with the no-follow procedure (no symlinks, FIFOs, hard links, oversized or changing files) |
+
+Every sandbox call is logged with a run ID. A record with `evidence_level: "local"` must cite a logged run ID and its
+exact command, and the report prints the harness-recorded output next to the agent's claim. The sandbox needs root
+on the host. In Docker, it also needs `seccomp=unconfined` and `apparmor=unconfined`; the start test detects a broken
+setup. `--sandbox-limit wall_s=60` changes a limit; `--sandbox-bind DIR` adds a read-only toolchain directory.
 
 ## Usage
 
@@ -82,8 +105,10 @@ The backend interface is one method (`async run(AgentRequest) -> AgentResult`), 
 python3 -m unittest discover -s tests -v
 ```
 
-The suite uses a scripted backend (no model) and covers the spec's test requirements R-TST-01 to R-TST-13, plus the
-STE length check of `SPEC.md` (`scripts/ste_check.py`).
+The suite uses a scripted backend (no model) and covers the spec's test requirements R-TST-01 to R-TST-20, plus the
+STE length check of `SPEC.md` (`scripts/ste_check.py`). The sandbox tests (`tests/test_sandbox.py`) use the real
+sandbox: they try a fork bomb, filling the disk, writes to the target and system directories, a remount, network access,
+leaking host environment variables, and promoting symlinks, FIFOs and hard links. They skip on hosts where the start test fails.
 
 ## Live acceptance run
 
@@ -95,8 +120,13 @@ with its exact blocker. The canary hook in the fixture's `.claude/settings.json`
 `CLAUDE.md` was reported as a hardening note instead of being obeyed. The run is marked `incomplete`
 (`hunt_budget_exhausted`) because the budget deferred 34 lower-priority units. The report lists each one.
 
-## Not in issue 1
+`examples/live-run-sandbox/` is a live run on `notesapp` with `--sandbox require` (`standard` profile, budget 24, $3.85).
+Hunters made 9 `sandbox_run` calls to try their PoCs and patches. One patch failed and was corrected before the
+candidate was filed. Both confirmed records have PoC result `fixed`: in the harness's own runs, each test exits
+non-zero on an unchanged copy and 0 on a patched copy. The default-token fallback, which source-only runs could only
+mark `needs_validation`, was confirmed by execution. The target directory was byte-identical afterwards. The path
+traversal was not reached in this run: the budget deferred 35 units (listed in the report).
 
-Sandboxed execution of PoC tests (`unshare`-based, see SPEC 13.1) and an automated Fixer (SPEC 13.2) are reserved
-extensions. Until then, each confirmed record carries a proposed PoC test and patch that are explicitly marked
-not executed.
+## Not built yet
+
+An automated Fixer (SPEC 13.2) is a reserved extension. A human must review every patch.

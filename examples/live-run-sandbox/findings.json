@@ -1,0 +1,273 @@
+[
+  {
+    "target": "notesapp",
+    "priority": "P1",
+    "reachability": "conditional",
+    "exposure": "exploitable_now",
+    "poc": {
+      "command": "python3 tests/test_default_credentials.py",
+      "original": {
+        "error": null,
+        "exit_code": 1,
+        "run_id": "sbx-00010",
+        "signal": null,
+        "stderr": "Traceback (most recent call last):\n  File \"/scratch/src/tests/test_default_credentials.py\", line 44, in <module>\n    test_default_tokens_rejected_when_env_unset()\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/scratch/src/tests/test_default_credentials.py\", line 35, in test_default_tokens_rejected_when_env_unset\n    assert r.returncode == 0, r.stdout + r.stderr\n           ^^^^^^^^^^^^^^^^^\nAssertionError: ACCEPTED 'change-me-a' as alice\n\n",
+        "stdout": "",
+        "timed_out": false
+      },
+      "patched": {
+        "error": null,
+        "exit_code": 0,
+        "run_id": "sbx-00011",
+        "signal": null,
+        "stderr": "",
+        "stdout": "ok\n",
+        "timed_out": false
+      },
+      "result": "fixed"
+    },
+    "record": {
+      "conditions": [
+        {
+          "description": "ALICE_TOKEN or BOB_TOKEN is unset in the deployed environment (the default token works) or set to an empty string (the empty token works).",
+          "kind": "system_configuration"
+        }
+      ],
+      "confidence": "medium",
+      "description": "storage.USERS reads each user's token with os.environ.get(VAR, 'change-me-x'). If an operator does not set ALICE_TOKEN or BOB_TOKEN, the service accepts the publicly known tokens 'change-me-a' and 'change-me-b', and nothing warns the operator. The repository's own test uses one of them. If a variable is set but empty, the stored token is ''. current_user then strips the 'Bearer ' prefix, gets an empty token, and hmac.compare_digest('', '') returns True. A request carrying only 'Authorization: Bearer ' is then authenticated as that user. Either way, an unauthenticated client takes over the account: it can list and delete the victim's notes and reach the authenticated export endpoint. The source has no deployment config, so whether a given deployment leaves the variables unset is outside the repository. The code defect is that provisioning fails open. Sandbox run sbx-00001 shows the exploit behavior under both conditions.",
+      "evidence": [
+        {
+          "description": "Fallback token 'change-me-a' for alice when ALICE_TOKEN is unset. An empty env value is accepted as-is.",
+          "file": "notesapp/storage.py",
+          "line": 6
+        },
+        {
+          "description": "Fallback token 'change-me-b' for bob when BOB_TOKEN is unset.",
+          "file": "notesapp/storage.py",
+          "line": 7
+        },
+        {
+          "description": "The only pre-check is the 'Bearer ' prefix. An empty token is not rejected.",
+          "file": "notesapp/auth.py",
+          "line": 13
+        },
+        {
+          "description": "Comparison against the possibly default or empty stored token, with no check that the stored token is configured and non-empty.",
+          "file": "notesapp/auth.py",
+          "line": 17
+        },
+        {
+          "description": "The test suite authenticates with the default 'change-me-a', which shows the fallback is the effective default credential.",
+          "file": "tests/test_notes.py",
+          "line": 11
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "default-credentials:notesapp/storage.py:USERS",
+      "intended_behavior": "An account whose token is not configured (unset or empty) must be impossible to log into. An empty presented token must always be rejected. No credential value may live in source.",
+      "poc_test": {
+        "code": "\"\"\"Regression: no publicly known or empty bearer token may authenticate.\"\"\"\nimport os\nimport subprocess\nimport sys\n\nROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n\nPROBE = r'''\nimport sys\nsys.path.insert(0, sys.argv[1])\nfrom notesapp import auth\nclass Req:\n    def __init__(self, token):\n        self.headers = {\"Authorization\": \"Bearer \" + token}\n        self.args = {}\nfor tok in sys.argv[2:]:\n    try:\n        u = auth.current_user(Req(tok))\n    except auth.AuthError:\n        continue\n    print(\"ACCEPTED\", repr(tok), \"as\", u[\"id\"])\n    sys.exit(1)\n'''\n\n\ndef _run(env_overrides, tokens):\n    env = {k: v for k, v in os.environ.items() if k not in (\"ALICE_TOKEN\", \"BOB_TOKEN\")}\n    env.update(env_overrides)\n    return subprocess.run([sys.executable, \"-I\", \"-c\", PROBE, ROOT] + tokens,\n                          env=env, capture_output=True, text=True)\n\n\ndef test_default_tokens_rejected_when_env_unset():\n    r = _run({}, [\"change-me-a\", \"change-me-b\"])\n    assert r.returncode == 0, r.stdout + r.stderr\n\n\ndef test_empty_token_rejected_when_env_empty():\n    r = _run({\"ALICE_TOKEN\": \"\", \"BOB_TOKEN\": \"\"}, [\"\"])\n    assert r.returncode == 0, r.stdout + r.stderr\n\n\nif __name__ == \"__main__\":\n    test_default_tokens_rejected_when_env_unset()\n    test_empty_token_rejected_when_env_empty()\n    print(\"ok\")\n",
+        "command": "python3 tests/test_default_credentials.py",
+        "expectation": "On the current code it exits 1 with AssertionError 'ACCEPTED change-me-a as alice'. After the patch it prints 'ok' and exits 0.",
+        "file_name": "tests/test_default_credentials.py",
+        "language": "python"
+      },
+      "remediation": {
+        "patch": "--- a/notesapp/storage.py\n+++ b/notesapp/storage.py\n@@ -2,9 +2,16 @@\n \n EXPORT_DIR = os.environ.get(\"NOTES_EXPORT_DIR\", \"/var/lib/notesapp/exports\")\n \n+\n+def _token(var):\n+    \"\"\"Return the configured token, or None (account disabled) if unset/empty.\"\"\"\n+    value = os.environ.get(var, \"\")\n+    return value or None\n+\n+\n USERS = {\n-    \"alice\": {\"id\": \"alice\", \"token\": os.environ.get(\"ALICE_TOKEN\", \"change-me-a\")},\n-    \"bob\": {\"id\": \"bob\", \"token\": os.environ.get(\"BOB_TOKEN\", \"change-me-b\")},\n+    \"alice\": {\"id\": \"alice\", \"token\": _token(\"ALICE_TOKEN\")},\n+    \"bob\": {\"id\": \"bob\", \"token\": _token(\"BOB_TOKEN\")},\n }\n \n NOTES = {\n--- a/notesapp/auth.py\n+++ b/notesapp/auth.py\n@@ -13,8 +13,14 @@\n     if not header.startswith(\"Bearer \"):\n         raise AuthError(\"missing token\")\n     token = header[len(\"Bearer \"):]\n+    if not token:\n+        raise AuthError(\"missing token\")\n+    presented = token.encode(\"utf-8\", \"surrogatepass\")\n     for user in USERS.values():\n-        if hmac.compare_digest(user[\"token\"], token):\n+        expected = user[\"token\"]\n+        if not expected:\n+            continue\n+        if hmac.compare_digest(expected.encode(\"utf-8\", \"surrogatepass\"), presented):\n             return user\n     raise AuthError(\"invalid token\")\n \n--- a/tests/test_notes.py\n+++ b/tests/test_notes.py\n@@ -1,3 +1,7 @@\n+import os\n+\n+os.environ.setdefault(\"ALICE_TOKEN\", \"test-token-alice\")\n+\n from notesapp import notes\n \n \n@@ -8,5 +12,5 @@\n \n \n def test_list_only_own():\n-    status, body = notes.list_notes(Req(\"change-me-a\"))\n+    status, body = notes.list_notes(Req(os.environ[\"ALICE_TOKEN\"]))\n     assert status == 200 and all(n[\"owner\"] == \"alice\" for n in body)\n",
+        "strategy": "Remove the hard-coded fallback tokens. Treat an unset or empty token as a disabled account. Reject an empty presented token. Compare bytes so non-ASCII input raises AuthError instead of TypeError. Update the existing test to provision its own token through the environment."
+      },
+      "root_cause": "Credential provisioning fails open. storage.USERS substitutes hard-coded, publicly known tokens when the env vars are missing and keeps empty values. current_user never checks that the expected token is configured and non-empty, or that the presented token is non-empty.",
+      "severity": {
+        "impact": {
+          "level": "high",
+          "rationale": "Full authentication bypass and takeover of the affected accounts. An anonymous client can read and delete every note of each user who has no configured token, and can reach the authenticated export endpoint."
+        },
+        "likelihood": {
+          "level": "medium",
+          "rationale": "This is the out-of-the-box behaviour. Nothing warns the operator, and the shipped test depends on the default. It still requires that the operator did not set strong values, and the repository has no deployment config to show which way it goes."
+        },
+        "overall": "high"
+      },
+      "threat_model": {
+        "affected_resource": "Every user account (alice, bob): all of their private notes (read via GET /notes) and deletion authority over them (DELETE /notes/<id>), plus the authenticated-only GET /export surface",
+        "assumption_broken": "Bearer tokens are operator-provisioned secrets. The code instead silently uses publicly known fallback tokens when the variables are unset, and accepts an empty token when a variable is set to ''.",
+        "attacker": "Any HTTP client who can reach dispatch() and has read the public source or test fixture",
+        "boundary": "Unauthenticated client -> authenticated user identity (current_user)",
+        "starting_capability": "Can send arbitrary requests with an Authorization header. Knows the literal strings 'change-me-a' and 'change-me-b' from notesapp/storage.py and tests/test_notes.py."
+      },
+      "title": "Hard-coded fallback bearer tokens and empty-token acceptance let anyone authenticate as any user",
+      "trace": [
+        {
+          "description": "Any HTTP client's request is routed to a handler, for example notes.list_notes for GET /notes. The dispatcher adds no authentication of its own.",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 16,
+          "scope": "dispatch"
+        },
+        {
+          "description": "The handler authenticates the caller only through current_user(request).",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 8,
+          "scope": "list_notes"
+        },
+        {
+          "description": "The token is taken verbatim from the header after 'Bearer '. An empty token is allowed.",
+          "file": "notesapp/auth.py",
+          "kind": "propagation",
+          "line": 15,
+          "scope": "current_user"
+        },
+        {
+          "description": "The expected token is os.environ.get('ALICE_TOKEN', 'change-me-a'): the hard-coded public default when unset, '' when set empty.",
+          "file": "notesapp/storage.py",
+          "kind": "propagation",
+          "line": 6,
+          "scope": "USERS"
+        },
+        {
+          "description": "hmac.compare_digest(user['token'], token) matches the public default, or '' against '', and returns the victim user object. The handler then acts as that user.",
+          "file": "notesapp/auth.py",
+          "kind": "sink",
+          "line": 17,
+          "scope": "current_user"
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  },
+  {
+    "target": "notesapp",
+    "priority": "P1",
+    "reachability": "reachable",
+    "exposure": "exploitable_now",
+    "poc": {
+      "command": "python3 tests/test_get_note_idor.py",
+      "original": {
+        "error": null,
+        "exit_code": 1,
+        "run_id": "sbx-00013",
+        "signal": null,
+        "stderr": "Traceback (most recent call last):\n  File \"/scratch/src/tests/test_get_note_idor.py\", line 32, in <module>\n    test_get_note_rejects_other_owner()\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/scratch/src/tests/test_get_note_idor.py\", line 21, in test_get_note_rejects_other_owner\n    assert status in (403, 404), (status, body)\n           ^^^^^^^^^^^^^^^^^^^^\nAssertionError: (200, {'id': 1, 'owner': 'alice', 'title': 'alice private', 'body': 'alice secret'})\n",
+        "stdout": "",
+        "timed_out": false
+      },
+      "patched": {
+        "error": null,
+        "exit_code": 0,
+        "run_id": "sbx-00014",
+        "signal": null,
+        "stderr": "",
+        "stdout": "ok\n",
+        "timed_out": false
+      },
+      "result": "fixed"
+    },
+    "record": {
+      "conditions": [
+        {
+          "description": "The attacker needs any valid bearer token (any authenticated user)",
+          "kind": "authentication_level"
+        },
+        {
+          "description": "The target note exists. Ids are sequential integers and easy to guess.",
+          "kind": "data_state"
+        }
+      ],
+      "confidence": "high",
+      "description": "get_note authenticates the caller but never checks that the caller owns the requested note. Note ids are small sequential integers, so any authenticated user can enumerate /notes/1, /notes/2, ... and read other users' private title and body. The sibling delete_note enforces require_owner and list_notes filters by owner. get_note is the only note-access path without per-owner isolation. No middleware, decorator or dispatch-level check compensates: dispatch routes straight to the handler.",
+      "evidence": [
+        {
+          "description": "Returns the note without calling require_owner or comparing note owner to user id",
+          "file": "notesapp/notes.py",
+          "line": 17
+        },
+        {
+          "description": "Sibling delete_note calls require_owner, showing the intended control",
+          "file": "notesapp/notes.py",
+          "line": 25
+        },
+        {
+          "description": "require_owner exists but get_note does not use it",
+          "file": "notesapp/auth.py",
+          "line": 22
+        },
+        {
+          "description": "States users must only see and change their own notes",
+          "file": "README.md",
+          "line": 4
+        },
+        {
+          "description": "Note ids are sequential small integers (1, 2), so they are trivially enumerable; storage.get has no owner filter (line 16-17)",
+          "file": "notesapp/storage.py",
+          "line": 11
+        }
+      ],
+      "evidence_level": "source",
+      "fingerprint": "idor:notesapp/notes.py:get_note",
+      "intended_behavior": "GET /notes/<id> returns a note only to its owner. Other users should get the same response as for a nonexistent note (404) or a 403.",
+      "poc_test": {
+        "code": "import sys, os\nsys.path.insert(0, os.getcwd())\nfrom notesapp import app, notes, storage\nfrom notesapp.auth import AuthError\n\n\nclass Req:\n    def __init__(self, token, method=\"GET\", path=\"/\", args=None):\n        self.headers = {\"Authorization\": f\"Bearer {token}\"}\n        self.method = method\n        self.path = path\n        self.args = args or {}\n\n\ndef test_get_note_rejects_other_owner():\n    bob_token = storage.USERS[\"bob\"][\"token\"]\n    try:\n        status, body = app.dispatch(Req(bob_token, \"GET\", \"/notes/1\"))\n    except AuthError:\n        return\n    assert status in (403, 404), (status, body)\n    assert not (isinstance(body, dict) and body.get(\"body\") == \"alice secret\"), body\n\n\ndef test_get_note_allows_owner():\n    status, body = app.dispatch(Req(storage.USERS[\"alice\"][\"token\"], \"GET\", \"/notes/1\"))\n    assert status == 200 and body[\"owner\"] == \"alice\"\n\n\nif __name__ == \"__main__\":\n    test_get_note_allows_owner()\n    test_get_note_rejects_other_owner()\n    print(\"ok\")\n",
+        "command": "python3 tests/test_get_note_idor.py",
+        "expectation": "On current code bob gets (200, alice's note), so the assertion fails and the script exits non-zero. With the patch bob gets 404 and the script prints 'ok' and exits 0.",
+        "file_name": "tests/test_get_note_idor.py",
+        "language": "python"
+      },
+      "remediation": {
+        "patch": "--- a/notesapp/notes.py\n+++ b/notesapp/notes.py\n@@ -12,6 +12,6 @@ def list_notes(request):\n def get_note(request, note_id):\n     user = current_user(request)\n     note = storage.get(int(note_id))\n-    if note is None:\n+    if note is None or note[\"owner\"] != user[\"id\"]:\n         return 404, {\"error\": \"not found\"}\n     return 200, note\n",
+        "strategy": "Enforce ownership in get_note. Treat a non-owned note the same as a missing one (404) so ids do not become an existence oracle. Alternatively call require_owner, as delete_note does."
+      },
+      "root_cause": "notes.get_note resolves the caller with current_user but drops the result and never calls require_owner (or filters by owner) before returning storage.get(id).",
+      "severity": {
+        "impact": {
+          "level": "high",
+          "rationale": "Full cross-user read of every user's private note content, defeating the documented per-owner isolation"
+        },
+        "likelihood": {
+          "level": "high",
+          "rationale": "Any authenticated user can exploit it with a single request and guessable sequential ids"
+        },
+        "overall": "high"
+      },
+      "threat_model": {
+        "affected_resource": "Title and body of every other user's notes in storage.NOTES",
+        "assumption_broken": "The README invariant that users may only see their own notes; get_note assumes authentication implies authorization",
+        "attacker": "Authenticated user of notesapp (e.g. bob)",
+        "boundary": "User A -> User B note read (per-owner isolation)",
+        "starting_capability": "A valid bearer token for their own account; can send GET /notes/<id> with arbitrary integer ids"
+      },
+      "title": "GET /notes/<id> returns any user's note (missing ownership check in get_note)",
+      "trace": [
+        {
+          "description": "Any path /notes/<x> is routed to get_note with the client-controlled x as note_id; no authorization happens in dispatch",
+          "file": "notesapp/app.py",
+          "kind": "entrypoint",
+          "line": 15,
+          "scope": "dispatch"
+        },
+        {
+          "description": "The caller is authenticated via current_user, but the resolved user is never used afterwards",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 13,
+          "scope": "get_note"
+        },
+        {
+          "description": "The client-supplied id is parsed and looked up with no owner filter",
+          "file": "notesapp/notes.py",
+          "kind": "propagation",
+          "line": 14,
+          "scope": "get_note"
+        },
+        {
+          "description": "The full note dict, including another owner's body, is returned with status 200",
+          "file": "notesapp/notes.py",
+          "kind": "sink",
+          "line": 17,
+          "scope": "get_note"
+        }
+      ],
+      "verdict": "confirmed"
+    }
+  }
+]
