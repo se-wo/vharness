@@ -385,7 +385,9 @@ class Store:
         )
 
     def invocation_count(self, run_id, target):
-        return self.x("SELECT COUNT(*) FROM invocations WHERE run_id=? AND target=?", run_id, target).fetchone()[0]
+        # R-RL-02: a refused (rate-limited) call does no work and does not count against the budget.
+        return self.x("SELECT COUNT(*) FROM invocations WHERE run_id=? AND target=? AND status != 'rate_limit'",
+                      run_id, target).fetchone()[0]
 
     def cost(self, run_id):
         return self.x("SELECT COALESCE(SUM(cost_usd), 0) FROM invocations WHERE run_id=?", run_id).fetchone()[0]

@@ -40,6 +40,9 @@ def _parser():
                      help="execute target code in the sandbox of SPEC 13.1 (needs root; start test before each run)")
     run.add_argument("--sandbox-limit", action="append", default=[], metavar="NAME=VALUE",
                      help="sandbox limit override, e.g. wall_s=60, mem_mb=1024, disk_mb=256, nproc=64")
+    run.add_argument("--on-rate-limit", choices=("wait", "stop"), default="wait",
+                     help="on a usage or rate limit: wait for the reset (up to --rate-limit-max-wait), or stop as paused")
+    run.add_argument("--rate-limit-max-wait", type=int, default=6 * 3600, metavar="SECONDS")
     run.add_argument("--fix", action="store_true", help="run the fixer on verified confirmed records (SPEC 13.2; needs --sandbox)")
     run.add_argument("--fix-attempts", type=int, default=2)
     run.add_argument("--sandbox-bind", action="append", default=[], metavar="DIR",
@@ -78,6 +81,7 @@ def cmd_run(a):
         context_window=a.context_window, sandbox=a.sandbox,
         sandbox_limits={k: int(v) for k, _, v in (x.partition("=") for x in a.sandbox_limit)},
         sandbox_binds=a.sandbox_bind, fix=a.fix, fix_attempts=a.fix_attempts,
+        on_rate_limit=a.on_rate_limit, rate_limit_max_wait_s=a.rate_limit_max_wait,
     )
     h = Harness(a.out, make_backend(a.backend), cfg)
     try:
@@ -86,7 +90,7 @@ def cmd_run(a):
         print(f"vharness: {exc}", file=sys.stderr)
         return 2
     asyncio.run(h.execute())
-    return 0 if h.store.run(h.run_id)["status"] == "complete" else 3
+    return _exit_code(h)
 
 
 def cmd_resume(a):
@@ -95,7 +99,12 @@ def cmd_resume(a):
     h = Harness(a.out, make_backend(a.backend), run_id=run["run_id"])
     h.resume()
     asyncio.run(h.execute())
-    return 0 if h.store.run(h.run_id)["status"] == "complete" else 3
+    return _exit_code(h)
+
+
+def _exit_code(h):
+    status = h.store.run(h.run_id)["status"]
+    return {"complete": 0, "paused": 4}.get(status, 3)  # R-CLI-05
 
 
 def cmd_status(a):

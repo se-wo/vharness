@@ -58,6 +58,10 @@ class Config:
     fix: bool = False  # SPEC 13.2
     fix_attempts: int = 2
     fix_max_lines: int = 200
+    on_rate_limit: str = "wait"  # wait | stop (SPEC 9.5)
+    rate_limit_max_wait_s: int = 6 * 3600
+    rate_limit_backoff_s: int = 60
+    rate_limit_backoff_max_s: int = 900
 
     @property
     def prof(self):
@@ -91,6 +95,8 @@ class Config:
             raise ValueError("sandbox must be off, auto or require")
         if self.fix and self.sandbox == "off":
             raise ValueError("--fix needs the sandbox (SPEC 13.2.1.2); use --sandbox auto or require")
+        if self.on_rate_limit not in ("wait", "stop"):
+            raise ValueError("on_rate_limit must be wait or stop")
         if self.fix_attempts < 1:
             raise ValueError("fix_attempts must be at least 1")
         if self.budget is not None and self.budget < 5:

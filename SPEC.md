@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Document | VH-SPEC-001 |
-| Issue | 7 |
+| Issue | 8 |
 | Date | 2026-10-30 |
 | Writing standard | ASD-STE100 (Simplified Technical English) |
 | Status | Approved for build |
@@ -247,7 +247,7 @@ NOTE: The stage priority moves each candidate to a final record quickly. Thus a 
 | R-PIPE-03 | The default concurrency limit must be 8. The operator can change it. |
 | R-PIPE-04 | The harness must continue a stopped run from the state store. |
 | R-PIPE-05 | On continuation, the harness must set each `running` task back to `queued`. |
-| R-PIPE-06 | A run must end in one of two terminal states: `complete` or `incomplete`. |
+| R-PIPE-06 | A run must end in one of two terminal states: `complete` or `incomplete`. A run can also stop in the state `paused` (9.5). A `paused` run is not terminal. |
 | R-PIPE-07 | An `incomplete` run must record the exact reason. |
 | R-PIPE-08 | The `report` stage must not use a model. |
 
@@ -769,6 +769,32 @@ NOTE: A temporary API error can arrive as text inside a successful response [REF
 | R-RTY-02 | A retry must use a new agent identifier. |
 | R-RTY-03 | The harness must not retry a malformed result in the same agent. |
 
+9.5. Rate limits
+
+9.5.1. A provider can refuse a request because of a usage limit or a rate limit. For example, a Claude subscription has usage windows.
+
+9.5.2. Procedure:
+
+1. Classify the refusal as `rate_limit`. Record the reset time, if the provider gives it.
+2. Put the task back in the queue. Do not count the attempt.
+3. Start no new agent. Let the agents that run now come to an end.
+4. If the reset time is known, wait until the reset time.
+5. If the reset time is not known, wait 60 seconds. For each new refusal, double the wait, up to 15 minutes.
+6. If the wait is longer than `rate_limit_max_wait`, stop with the run status `paused`.
+7. If the operator selected `--on-rate-limit stop`, stop with the run status `paused`.
+
+9.5.3. Requirements
+
+| ID | Requirement |
+|---|---|
+| R-RL-01 | The backend must classify a refusal for a usage limit or a rate limit as `rate_limit`. |
+| R-RL-02 | A `rate_limit` result must not count as an attempt. It must not count against the budget. |
+| R-RL-03 | After a `rate_limit` result, the harness must start no new agent until the wait ends. |
+| R-RL-04 | A unit that was `in_progress` for the refused task must go back to `planned`. |
+| R-RL-05 | The report of a `paused` run must give the reset time and the command that continues the run. |
+| R-RL-06 | The `resume` command must continue a `paused` run. |
+| R-RL-07 | The default `rate_limit_max_wait` must be 6 hours. |
+
 ---
 
 ## 10. Budget and profiles
@@ -842,6 +868,7 @@ NOTE: A temporary API error can arrive as text inside a successful response [REF
 | R-CLI-02 | The `run` command must refuse a target that is not a directory. |
 | R-CLI-03 | The `check` command must return a non-zero exit code if a check fails. |
 | R-CLI-04 | The harness must show progress for each task on the standard error stream. |
+| R-CLI-05 | The `run` and `resume` commands must return the exit code 4 for a `paused` run. |
 
 ---
 
@@ -1107,6 +1134,14 @@ WARNING: DO NOT LET THE `fixer` WRITE TO THE TARGET. THE FIXER GIVES A PATCH FIL
 | R-TST-24 | A test must show that a patch that changes a test of the target gives `needs_human`. |
 | R-TST-25 | A test must show that the target is not changed after the `fix` stage. |
 | R-TST-26 | A test must show the combined result `ok`, and the combined result `interaction` for two fixes that each pass alone. |
+
+12.4. Test requirements for rate limits
+
+| ID | Requirement |
+|---|---|
+| R-TST-27 | A test must show that a run waits after a rate limit and then completes, with no blocked unit. |
+| R-TST-28 | A test must show the status `paused`, and that `resume` then completes the run. |
+| R-TST-29 | A test must show that the backend classifies a usage-limit message and a rejected rate-limit event as `rate_limit`. |
 
 ---
 

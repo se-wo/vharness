@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from collections import Counter
 
 from . import records
@@ -157,7 +158,13 @@ def write_reports(store, run_id, out):
     L = ["# Security audit report", ""]
     # 1. Run data
     L += ["## 1. Run", ""]
-    if partial:
+    if run["status"] == "paused":  # R-RL-05
+        pause = store.doc(run_id, "", "pause", parse=True) or {}
+        until = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(pause.get("until", 0)))
+        L += [f"> **This run is paused by a rate limit** ({pause.get('message', '')}). The limit resets at about {until}"
+              f"{'' if pause.get('reset_known') else ' (estimated)'}. Continue with `python3 -m vharness resume --out {out}`. "
+              "This report covers only the work done so far.", ""]
+    elif partial:
         reasons = run["reason"] or ("quick profile" if cfg["profile"] == "quick" else "scoped run")
         L += [f"> **This is a partial pass.** Status: `{run['status']}`. Reason: {reasons}.", ""]
     L += [

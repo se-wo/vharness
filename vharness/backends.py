@@ -15,9 +15,17 @@ from dataclasses import dataclass, field
 from . import schemas
 from .guard import ALLOWED_TOOLS, DENIED_TOOLS, make_pre_tool_hook
 
+# Usage-limit and rate-limit refusals (R-RL-01). Checked before the generic API error text.
+RATE_LIMIT_RE = re.compile(
+    r"(usage limit|limit reached|hit your limit|rate_limit_error|rate limit|rate-limit|too many requests|"
+    r"\b429\b|out of extra usage|weekly limit|5-hour limit)",
+    re.IGNORECASE,
+)
+RESET_EPOCH_RE = re.compile(r"\|(\d{10})\b")  # "Claude AI usage limit reached|1793400000"
+
 # Text that signals a provider/API failure even inside a "successful" stream (R-AGT-08).
 API_ERROR_RE = re.compile(
-    r"(API Error|api_error|overloaded_error|Overloaded|rate_limit_error|rate limit|"
+    r"(API Error|api_error|overloaded_error|Overloaded|"
     r"Internal server error|internal_server_error|Request timed out|ECONNRESET|socket hang up|"
     r"\b5\d\d\b.{0,40}(error|status)|Credit balance is too low|authentication_error)",
     re.IGNORECASE,
@@ -53,7 +61,7 @@ class AgentResult:
     ok: bool
     output: dict | None = None
     error: str | None = None
-    error_kind: str | None = None  # backend | api_text | malformed | timeout
+    error_kind: str | None = None  # backend | api_text | malformed | timeout | rate_limit
     turns: int = 0
     cost_usd: float = 0.0
     input_tokens: int = 0
@@ -61,10 +69,22 @@ class AgentResult:
     duration_ms: int = 0
     raw_text: str = ""
     denials: list = field(default_factory=list)
+    resets_at: float | None = None  # unix time when a rate limit resets, if known
 
     @property
     def retryable(self):
         return self.error_kind in ("backend", "api_text", "timeout")
+
+
+def rate_limited(text, errors=None, http_status=None, event_resets_at=None, event_rejected=False):
+    """R-RL-01: return (True, resets_at) when a failure is a usage-limit or rate-limit refusal."""
+    blob = " ".join([text or ""] + [str(e) for e in (errors or [])])
+    if not (event_rejected or http_status == 429 or RATE_LIMIT_RE.search(blob)):
+        return False, None
+    resets_at = event_resets_at
+    if resets_at is None and (m := RESET_EPOCH_RE.search(blob)):
+        resets_at = float(m.group(1))
+    return True, resets_at
 
 
 def classify(output, result_text, is_error, subtype, errors, schema):
@@ -92,7 +112,8 @@ class ClaudeBackend:
         self.cli_path = cli_path
 
     async def run(self, req: AgentRequest) -> AgentResult:
-        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ResultMessage, create_sdk_mcp_server, query, tool
+        from claude_agent_sdk import (ClaudeAgentOptions, HookMatcher, RateLimitEvent, ResultMessage, create_sdk_mcp_server,
+                                      query, tool)
 
         mcp_servers, extra = {}, []
         if req.tools:
@@ -133,6 +154,7 @@ class ClaudeBackend:
         start = time.monotonic()
         final = None
         texts = []
+        limit = {"rejected": False, "resets_at": None}
 
         async def prompt_stream():
             # Streaming input mode is required for SDK hooks.
@@ -144,6 +166,12 @@ class ClaudeBackend:
                 if isinstance(message, ResultMessage):
                     final = message
                     continue  # drain the stream; breaking early leaves the SDK generator open
+                if isinstance(message, RateLimitEvent):
+                    info = message.rate_limit_info
+                    if info.status == "rejected":
+                        limit["rejected"] = True
+                        limit["resets_at"] = info.resets_at or info.overage_resets_at
+                    continue
                 for block in getattr(message, "content", None) or []:
                     text = getattr(block, "text", None)
                     if isinstance(text, str):
@@ -156,12 +184,15 @@ class ClaudeBackend:
                                duration_ms=int((time.monotonic() - start) * 1000))
         except Exception as exc:  # CLI/process/transport failure
             text = f"{type(exc).__name__}: {exc}"
-            return AgentResult(False, error=text[:1000], error_kind="backend",
+            hit, resets_at = rate_limited(text, event_resets_at=limit["resets_at"], event_rejected=limit["rejected"])
+            return AgentResult(False, error=text[:1000], error_kind="rate_limit" if hit else "backend", resets_at=resets_at,
                                duration_ms=int((time.monotonic() - start) * 1000))
 
         duration = int((time.monotonic() - start) * 1000)
         if final is None:
-            return AgentResult(False, error="no result message", error_kind="backend", duration_ms=duration)
+            hit, resets_at = rate_limited("\n".join(texts[-3:]), event_resets_at=limit["resets_at"], event_rejected=limit["rejected"])
+            return AgentResult(False, error="no result message", error_kind="rate_limit" if hit else "backend",
+                               resets_at=resets_at, duration_ms=duration)
         usage = final.usage or {}
         result_text = final.result or "\n".join(texts[-3:])
         output = final.structured_output
@@ -171,6 +202,12 @@ class ClaudeBackend:
             except ValueError:
                 output = None
         ok, kind, err = classify(output, result_text, final.is_error, final.subtype, final.errors, req.schema)
+        resets_at = None
+        if not ok:
+            hit, resets_at = rate_limited(result_text, final.errors, getattr(final, "api_error_status", None),
+                                          limit["resets_at"], limit["rejected"])
+            if hit:
+                kind, err = "rate_limit", f"rate limit: {(result_text or '; '.join(final.errors or []))[:300]}"
         return AgentResult(
             ok, output=output if ok else None, error=err, error_kind=kind,
             turns=final.num_turns or 0, cost_usd=final.total_cost_usd or 0.0,
@@ -178,7 +215,7 @@ class ClaudeBackend:
             + (usage.get("cache_creation_input_tokens") or 0),
             output_tokens=usage.get("output_tokens") or 0,
             duration_ms=duration, raw_text=result_text or "",
-            denials=list(final.permission_denials or []),
+            denials=list(final.permission_denials or []), resets_at=resets_at,
         )
 
 
@@ -209,6 +246,10 @@ class ScriptedBackend:
             return out
         if isinstance(out, str):
             ok, kind, err = classify(None, out, False, "success", None, req.schema)
+            hit, resets_at = rate_limited(out)
+            if hit:
+                return AgentResult(False, error=f"rate limit: {out[:300]}", error_kind="rate_limit", turns=1, raw_text=out,
+                                   resets_at=resets_at)
             return AgentResult(ok, error=err, error_kind=kind, turns=1, raw_text=out)
         turns = out.pop("__turns__", self.turns) if isinstance(out, dict) else self.turns
         ok, kind, err = classify(out, "", False, "success", None, req.schema)

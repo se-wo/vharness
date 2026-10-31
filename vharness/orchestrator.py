@@ -19,6 +19,14 @@ from .knowledge import Knowledge
 from .report import write_reports
 from .store import OPEN_TASK, Store
 
+class RateLimited(Exception):
+    """Raised by invoke() when the provider refuses a call for a usage or rate limit (SPEC 9.5)."""
+
+    def __init__(self, resets_at, message):
+        super().__init__(message)
+        self.resets_at = resets_at
+
+
 UPSTREAM_OF_VERIFY = ("recon", "hunt", "gapfill", "dedup", "validate", "poc", "trace")
 
 
@@ -77,6 +85,9 @@ class Harness:
             self.run_id = run_id
             self.cfg = Config.from_dict(json.loads(run["config"]))
         self.budget = None
+        self.paused_until = None  # SPEC 9.5: no new agent before this time
+        self.pause_stop = False  # stop as `paused` once running agents end
+        self._backoff = None
         self.sandbox = None
         self._sbx_sem = None
         self.prior_records = {}
@@ -225,6 +236,9 @@ class Harness:
 
     def resume(self):
         self.budget = Budget(self.store, self.run_id, self.cfg)
+        pause = self.store.doc(self.run_id, "", "pause", parse=True)
+        if pause and pause.get("until", 0) > time.time():  # R-RL-06: still inside the window -> wait first
+            self.paused_until = pause["until"]
         self.start_sandbox()
         n = self.store.requeue_running(self.run_id)
         for t in self.store.targets(self.run_id):
@@ -303,6 +317,10 @@ class Harness:
             self.store.update_task(task["task_id"], agent_id=agent, model=model)
             status = "ok" if result.ok else f"{result.error_kind}: {(result.error or '')[:120]}"
             self.log(f"[{target}] {role:<9} {agent} {status} ({result.turns} turns, ${result.cost_usd:.3f})")
+            if result.error_kind == "rate_limit":  # R-RL-02/03: not an attempt; the loop pauses and requeues
+                raise RateLimited(result.resets_at, result.error or "rate limit")
+            if result.ok:
+                self._backoff = None
             if result.ok or not result.retryable or attempt == 1 or not self.budget.can_spend(target):
                 return result, agent
         return result, agent
@@ -353,19 +371,53 @@ class Harness:
                     if not rec["final"] and rec["fingerprint"] not in queued and not rec["verifiers"]:
                         self.store.add_task(self.run_id, target, "verify", {"fingerprint": rec["fingerprint"], "round": 1, "attempt": 0})
 
+    def rate_limited(self, task, exc):
+        """SPEC 9.5.2: requeue the task without counting the attempt, and pause new agents."""
+        self.store.update_task(task["task_id"], status="queued", attempts=task["attempts"],
+                               error=f"rate limited: {str(exc)[:300]}")
+        if task["stage"] == "hunt":  # R-RL-04
+            for cid in task["payload"].get("units", []):
+                u = self.store.unit(self.run_id, task["target"], cid)
+                if u and u["status"] == "in_progress":
+                    u.update(status="planned", agent_id=None)
+                    self.store.put_unit(self.run_id, task["target"], u)
+        now = time.time()
+        if exc.resets_at:
+            until = float(exc.resets_at) + 5
+        else:
+            self._backoff = min((self._backoff or self.cfg.rate_limit_backoff_s / 2) * 2, self.cfg.rate_limit_backoff_max_s)
+            until = now + self._backoff
+        self.paused_until = max(self.paused_until or 0, until)
+        wait = self.paused_until - now
+        if self.cfg.on_rate_limit == "stop" or wait > self.cfg.rate_limit_max_wait_s:
+            self.pause_stop = True
+        self.store.put_doc(self.run_id, "", "pause", {"until": self.paused_until, "message": str(exc)[:300],
+                                                      "reset_known": bool(exc.resets_at)})
+        self.log(f"rate limit: no new agents until {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.paused_until))} "
+                 f"({int(wait)}s){'; the run will stop as paused' if self.pause_stop else ''}")
+
     async def run_loop(self):
         if not self.budget.minimum_fundable():
             self.incomplete("budget_cannot_fund_reconnaissance_and_reserves")
             return
         running = {}
         while True:
-            while len(running) < self.cfg.concurrency:
+            paused = self.paused_until is not None and time.time() < self.paused_until
+            if self.paused_until is not None and not paused and not self.pause_stop:
+                self.log("rate limit: wait over, starting agents again")
+                self.paused_until = None
+            while not paused and not self.pause_stop and len(running) < self.cfg.concurrency:
                 task = self.store.next_task(self.run_id)
                 if not task:
                     break
                 self.store.update_task(task["task_id"], status="running", attempts=task["attempts"] + 1)
                 running[asyncio.ensure_future(self.dispatch(task))] = task
             if not running:
+                if self.pause_stop:
+                    return  # R-RL: stop as `paused`; `vharness resume` continues
+                if paused:
+                    await asyncio.sleep(max(0.05, min(self.paused_until - time.time(), 30)))
+                    continue
                 self.advance()
                 if self.store.next_task(self.run_id):
                     continue
@@ -376,6 +428,8 @@ class Harness:
                 try:
                     status = fut.result() or "done"
                     self.store.update_task(task["task_id"], status=status)
+                except RateLimited as exc:
+                    self.rate_limited(task, exc)
                 except Exception:
                     err = traceback.format_exc()
                     self.store.update_task(task["task_id"], status="failed", error=err[-2000:])
@@ -385,6 +439,11 @@ class Harness:
 
     def finish(self):
         """Decide the terminal state (R-PIPE-06/07) and write reports (no model, R-PIPE-08)."""
+        if self.pause_stop:  # SPEC 9.5: not terminal; write a partial report and stop
+            self.store.set_run_status(self.run_id, "paused")
+            paths = write_reports(self.store, self.run_id, self.out)
+            self.log(f"run {self.run_id} paused by a rate limit; continue with: python3 -m vharness resume --out {self.out}")
+            return paths
         for t in self.store.targets(self.run_id):
             open_c = self.store.candidates(self.run_id, t["target"], ["pending", "dedup_pending", "primary", "unvalidated"])
             if open_c:
