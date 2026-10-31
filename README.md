@@ -93,6 +93,23 @@ Each patch is made against the unchanged commit. When a target's fixes are done,
 `accepted` patches together, in priority order, and reruns every regression test and suite. It reports `ok`,
 `conflict` or `interaction`, so a reviewer knows whether the fixes can be stacked on one branch.
 
+## Rate limits and usage windows
+
+A refusal for a usage limit or a rate limit is its own error kind, `rate_limit`. That covers a rejected rate-limit
+event from the CLI, HTTP 429, or usage-limit text even inside a "successful" response. A refused call is not counted
+as an attempt or against `--budget`. Its task goes back in the queue, and an interrupted hunter's units go back to
+`planned`. No new agent starts until the reset time, and agents already running finish first. If the provider gives no
+reset time, the wait backs off from 60 seconds to 15 minutes.
+
+- `--on-rate-limit wait` (default) waits up to `--rate-limit-max-wait` seconds (default 6 hours), then carries on.
+- `--on-rate-limit stop`, or a reset further away than the maximum, ends the run as `paused` (exit code 4) with a
+  partial report. `python3 -m vharness resume --out <dir>` continues it later.
+
+Agents run through the `claude` CLI, so they use whatever login the CLI has: `ANTHROPIC_API_KEY` if set, otherwise
+the CLI's own sign-in. The [Agent SDK docs](https://code.claude.com/docs/en/agent-sdk/overview) ask third-party
+products to use API keys rather than offer claude.ai login. With a subscription, lower `--concurrency`, and use
+`--budget` rather than `--max-usd`, because the reported cost is then an API-price estimate.
+
 ## Usage
 
 ```bash
@@ -128,7 +145,7 @@ The backend interface is one method (`async run(AgentRequest) -> AgentResult`), 
 python3 -m unittest discover -s tests -v
 ```
 
-The suite uses a scripted backend (no model) and covers the spec's test requirements R-TST-01 to R-TST-25, plus the
+The suite uses a scripted backend (no model) and covers the spec's test requirements R-TST-01 to R-TST-29, plus the
 STE length check of `SPEC.md` (`scripts/ste_check.py`). The sandbox tests (`tests/test_sandbox.py`) use the real
 sandbox: they try a fork bomb, filling the disk, writes to the target and system directories, a remount, network access,
 leaking host environment variables, and promoting symlinks, FIFOs and hard links. They skip on hosts where the start test fails.
